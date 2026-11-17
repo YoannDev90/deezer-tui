@@ -3614,8 +3614,12 @@ impl Daemon {
                     // Ignore a payload for a track we already moved past.
                     if self.lyrics_track_id.as_deref() == Some(track_id.as_str()) {
                         self.lyrics_loading = false;
+                        // No lyrics is a valid answer: don't claim a load the
+                        // overlay is about to contradict.
+                        if lyrics.is_some() {
+                            self.status_msg = Some(t().status_lyrics_loaded.into());
+                        }
                         self.lyrics = lyrics;
-                        self.status_msg = Some(t().status_lyrics_loaded.into());
                     }
                 }
                 AsyncResult::LyricsError { track_id, err } => {

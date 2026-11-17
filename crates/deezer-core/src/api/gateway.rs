@@ -137,16 +137,21 @@ impl DeezerClient {
         Ok(track)
     }
 
-    /// Fetch track lyrics. Deezer answers with a `DATA_ERROR` when it has none,
-    /// which maps to `Ok(None)`.
+    /// Fetch track lyrics from the pipe.deezer.com GraphQL API.
+    ///
+    /// The gw-light `song.getLyrics` method answers `DATA_ERROR` ("No lyrics id
+    /// for … and country FR") for every track, so the lyrics live on the
+    /// GraphQL `Track.lyrics` field instead. `Ok(None)` when the track has none.
     pub async fn get_lyrics(&self, song_id: &str) -> Result<Option<Lyrics>, DeezerError> {
-        let params = json!({ "sng_id": song_id });
-        let results = match self.gw_call("song.getLyrics", params).await {
-            Ok(results) => results,
-            Err(DeezerError::Api(msg)) if msg.contains("DATA_ERROR") => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        Ok(parse_lyrics(&results))
+        // The id is embedded in the query string, so escape it like the other
+        // GraphQL helpers do.
+        let escaped_id = song_id.replace('\\', "\\\\").replace('"', "\\\"");
+        let query = format!(
+            r#"{{ track(trackId: "{escaped_id}") {{ lyrics {{ text copyright writers synchronizedLines {{ line milliseconds duration }} }} }} }}"#
+        );
+
+        let data = self.graphql_call(&query).await?;
+        Ok(parse_lyrics(&data))
     }
 
     /// Get multiple tracks at once (includes TRACK_TOKEN and MD5_ORIGIN).
@@ -1806,20 +1811,22 @@ fn parse_id(id: &str) -> serde_json::Value {
     }
 }
 
-/// Turn a `song.getLyrics` result into a `Lyrics`. Time-aligned lines come from
-/// `LYRICS_SYNC_JSON`; entries without a `milliseconds` field are verse breaks
-/// and are dropped from the synced list. `LYRICS_TEXT` is the unsynced fallback.
-fn parse_lyrics(results: &serde_json::Value) -> Option<Lyrics> {
-    let synced: Vec<LyricLine> = results
-        .get("LYRICS_SYNC_JSON")
+/// Turn a `track { lyrics { … } }` GraphQL payload into `Lyrics`.
+///
+/// Time-aligned lines come from `synchronizedLines`; entries without a
+/// `milliseconds` offset can't be placed on the timeline and are dropped from
+/// the synced list. `text` is the unsynced body, also the fallback when the
+/// track has no synchronized lines.
+fn parse_lyrics(data: &serde_json::Value) -> Option<Lyrics> {
+    let lyrics = data.pointer("/track/lyrics")?;
+
+    let synced: Vec<LyricLine> = lyrics
+        .get("synchronizedLines")
         .and_then(|v| v.as_array())
         .into_iter()
         .flatten()
         .filter_map(|line| {
-            let at_ms = line.get("milliseconds").and_then(|m| {
-                m.as_u64()
-                    .or_else(|| m.as_str().and_then(|s| s.parse().ok()))
-            })?;
+            let at_ms = line.get("milliseconds").and_then(|m| m.as_u64())?;
             let text = line.get("line").and_then(|l| l.as_str()).unwrap_or("");
             Some(LyricLine {
                 at_ms,
@@ -1828,34 +1835,31 @@ fn parse_lyrics(results: &serde_json::Value) -> Option<Lyrics> {
         })
         .collect();
 
-    let text = results
-        .get("LYRICS_TEXT")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let text = lyrics.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let plain: Vec<String> = if text.trim().is_empty() {
         synced.iter().map(|l| l.text.clone()).collect()
     } else {
         text.lines().map(|l| l.trim_end().to_string()).collect()
     };
 
-    let lyrics = Lyrics {
+    let parsed = Lyrics {
         synced,
         plain,
-        writers: results
-            .get("LYRICS_WRITERS")
+        writers: lyrics
+            .get("writers")
             .and_then(|w| w.as_str())
             .unwrap_or("")
             .to_string(),
-        copyright: results
-            .get("LYRICS_COPYRIGHTS")
+        copyright: lyrics
+            .get("copyright")
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string(),
     };
-    if lyrics.is_empty() {
+    if parsed.is_empty() {
         None
     } else {
-        Some(lyrics)
+        Some(parsed)
     }
 }
 
@@ -1997,18 +2001,23 @@ mod tests {
 
     #[test]
     fn lyrics_parse_synced_lines_and_plain_text() {
-        let results = serde_json::json!({
-            "LYRICS_SYNC_JSON": [
-                { "line": "Work it", "milliseconds": "51480", "duration": "1160" },
-                { "line": "" },
-                { "line": "Harder", "milliseconds": 59710, "duration": "1190" }
-            ],
-            "LYRICS_TEXT": "Work it\r\n\r\nHarder",
-            "LYRICS_WRITERS": "Thomas Bangalter",
-            "LYRICS_COPYRIGHTS": "Because"
+        let data = serde_json::json!({
+            "track": {
+                "lyrics": {
+                    "text": "Work it\r\n\r\nHarder",
+                    "synchronizedLines": [
+                        { "line": "Work it", "milliseconds": 51480, "duration": 1160 },
+                        { "line": "", "milliseconds": null },
+                        { "line": "Harder", "milliseconds": 59710, "duration": 1190 }
+                    ],
+                    "writers": "Thomas Bangalter",
+                    "copyright": "Because"
+                }
+            }
         });
-        let lyrics = parse_lyrics(&results).unwrap();
-        // Verse break (no `milliseconds`) is dropped from the synced list.
+        let lyrics = parse_lyrics(&data).unwrap();
+        // An untimed line can't be placed on the timeline, so it's dropped
+        // from the synced list.
         assert_eq!(
             lyrics.synced,
             vec![
@@ -2028,22 +2037,32 @@ mod tests {
     }
 
     #[test]
-    fn lyrics_fall_back_to_synced_text_without_lyrics_text() {
-        let results = serde_json::json!({
-            "LYRICS_SYNC_JSON": [
-                { "line": "La la", "milliseconds": "1000" },
-                { "line": "La", "milliseconds": "2000" }
-            ]
+    fn lyrics_fall_back_to_synced_text_without_plain_text() {
+        let data = serde_json::json!({
+            "track": {
+                "lyrics": {
+                    "text": "",
+                    "synchronizedLines": [
+                        { "line": "La la", "milliseconds": 1000 },
+                        { "line": "La", "milliseconds": 2000 }
+                    ]
+                }
+            }
         });
-        let lyrics = parse_lyrics(&results).unwrap();
+        let lyrics = parse_lyrics(&data).unwrap();
         assert_eq!(lyrics.plain, vec!["La la", "La"]);
     }
 
     #[test]
     fn empty_lyrics_payload_is_none() {
         assert_eq!(parse_lyrics(&serde_json::json!({})), None);
+        assert_eq!(parse_lyrics(&serde_json::json!({ "track": null })), None);
         assert_eq!(
-            parse_lyrics(&serde_json::json!({ "LYRICS_TEXT": "   " })),
+            parse_lyrics(&serde_json::json!({ "track": { "lyrics": null } })),
+            None
+        );
+        assert_eq!(
+            parse_lyrics(&serde_json::json!({ "track": { "lyrics": { "text": "   " } } })),
             None
         );
     }
@@ -2070,6 +2089,36 @@ mod tests {
         assert!(!is_stale_jwt(&DeezerError::Auth(
             "Not authenticated".into()
         )));
+    }
+
+    #[tokio::test]
+    #[ignore = "live API: requires valid ARL token + network"]
+    async fn lyrics_are_fetched_from_graphql() {
+        let mut client = DeezerClient::new().unwrap();
+        client.login_arl(&arl()).await.expect("login failed");
+
+        // "Everything Counts" — Depeche Mode: a track with synchronized lyrics.
+        // The gw-light `song.getLyrics` path is dead (`DATA_ERROR` for every
+        // track), so this also guards against quietly reverting to it.
+        let lyrics = client
+            .get_lyrics("68513660")
+            .await
+            .expect("get_lyrics failed")
+            .expect("track should have lyrics");
+        println!(
+            "synced lines: {}, plain lines: {}",
+            lyrics.synced.len(),
+            lyrics.plain.len()
+        );
+        assert!(!lyrics.synced.is_empty(), "synced lines expected");
+        assert!(
+            lyrics
+                .synced
+                .iter()
+                .any(|l| l.text.contains("grabbing hands")),
+            "expected a known line in the synced lyrics"
+        );
+        assert!(!lyrics.writers.is_empty(), "writers expected");
     }
 
     #[tokio::test]
