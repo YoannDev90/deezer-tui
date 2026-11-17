@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Live lyrics always came back empty ("No lyrics available for this track"): Deezer's gw-light `song.getLyrics` now answers `DATA_ERROR` for every track, so lyrics are fetched from the GraphQL `track { lyrics }` field instead
 - The status bar no longer claims "Lyrics loaded" when the track has no lyrics
+- Live lyrics no longer fail with "Given jwt token is not valid anymore"
 
 ## [1.22.0] - 2026-11-16
 

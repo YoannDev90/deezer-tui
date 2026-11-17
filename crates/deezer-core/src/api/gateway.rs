@@ -1940,9 +1940,11 @@ fn parse_chart_playlist(v: &serde_json::Value) -> Option<super::models::Playlist
 /// True for the errors a fresh JWT can plausibly resolve.
 ///
 /// Deezer reports an expired pipe.deezer.com token as a GraphQL error message
-/// ("JWT token has expired, please reauthenticate") rather than a status code,
-/// so the message has to be matched. Kept narrow on purpose: a retry must not
-/// be triggered by unrelated GraphQL failures.
+/// rather than a status code, and words it several ways — "JWT token has
+/// expired, please reauthenticate" from the older queries, "Given jwt token is
+/// not valid anymore, please refresh it or re-authenticate" from the newer
+/// ones — so the message has to be matched. Kept narrow on purpose: a retry
+/// must not be triggered by unrelated GraphQL failures.
 fn is_stale_jwt(err: &DeezerError) -> bool {
     match err {
         // Raised by graphql_attempt itself for a 401/403.
@@ -1951,7 +1953,10 @@ fn is_stale_jwt(err: &DeezerError) -> bool {
             let msg = msg.to_ascii_lowercase();
             msg.contains("jwt")
                 && (msg.contains("expired")
+                    // Both spellings: "reauthenticate" and "re-authenticate".
                     || msg.contains("reauthenticate")
+                    || msg.contains("re-authenticate")
+                    || msg.contains("not valid")
                     || msg.contains("invalid"))
         }
         _ => false,
@@ -1961,7 +1966,7 @@ fn is_stale_jwt(err: &DeezerError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{build_all_results, is_stale_jwt, parse_lyrics};
-    use crate::api::models::{AlbumData, DeezerError, DisplayItem, ItemKind, LyricLine};
+    use crate::api::models::{DeezerError, ItemKind, LyricLine};
     use crate::api::DeezerClient;
 
     /// Live tests read the ARL from the environment so no token is committed.
@@ -2073,6 +2078,13 @@ mod tests {
         assert!(is_stale_jwt(&DeezerError::Api(
             "GraphQL error: JWT token has expired, please reauthenticate".into()
         )));
+        // The newer wording, seen on the lyrics query: same failure, no
+        // "expired" and a hyphenated "re-authenticate".
+        assert!(is_stale_jwt(&DeezerError::Api(
+            "API error: GraphQL error: Given jwt token is not valid anymore, \
+             please refresh it or re-authenticate"
+                .into()
+        )));
         // The 401/403 path raises Auth instead.
         assert!(is_stale_jwt(&DeezerError::Auth(
             "GraphQL rejected the JWT (status=401 Unauthorized)".into()
@@ -2088,6 +2100,14 @@ mod tests {
         // "Not authenticated" is a missing session, not a stale token.
         assert!(!is_stale_jwt(&DeezerError::Auth(
             "Not authenticated".into()
+        )));
+        // "not valid" without a JWT in the message is a bad argument, not a
+        // token to refresh.
+        assert!(!is_stale_jwt(&DeezerError::Api(
+            "GraphQL error: Given trackId is not valid".into()
+        )));
+        assert!(!is_stale_jwt(&DeezerError::Api(
+            "GraphQL error: Track does not exist".into()
         )));
     }
 
