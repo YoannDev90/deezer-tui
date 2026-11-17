@@ -1,9 +1,9 @@
 #!/bin/sh
 # Deezer TUI installer
-# Usage: curl -LsSf https://raw.githubusercontent.com/Tatayoyoh/deezer-tui/main/install.sh | sh
+# Usage: curl -LsSf https://raw.githubusercontent.com/YoannDev90/deezer-tui/main/install.sh | sh
 set -e
 
-REPO="Tatayoyoh/deezer-tui"
+REPO="YoannDev90/deezer-tui"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="deezer-tui"
 
@@ -51,13 +51,30 @@ TMP_FILE="$(mktemp)"
 trap 'rm -f "${TMP_FILE}"' EXIT
 
 echo "Downloading ${DOWNLOAD_URL}..."
-if command -v curl >/dev/null 2>&1; then
-    curl -fSL --progress-bar -o "${TMP_FILE}" "${DOWNLOAD_URL}"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q --show-progress -O "${TMP_FILE}" "${DOWNLOAD_URL}"
-else
-    echo "Error: neither curl nor wget found"
-    exit 1
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL --progress-bar -o "${TMP_FILE}" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress -O "${TMP_FILE}" "$1"
+    else
+        echo "Error: neither curl nor wget found"
+        exit 1
+    fi
+}
+
+if ! download "${DOWNLOAD_URL}"; then
+    # This fork only publishes Linux binaries; macOS builds come from upstream.
+    if [ "${OS}" = "Darwin" ]; then
+        FALLBACK_URL="https://github.com/Tatayoyoh/deezer-tui/releases/latest/download/${ASSET}"
+        echo "No macOS binary on ${REPO}, trying upstream instead..."
+        if ! download "${FALLBACK_URL}"; then
+            echo "Error: download failed for ${DOWNLOAD_URL} and ${FALLBACK_URL}"
+            exit 1
+        fi
+    else
+        echo "Error: download failed for ${DOWNLOAD_URL}"
+        exit 1
+    fi
 fi
 
 chmod +x "${TMP_FILE}"
