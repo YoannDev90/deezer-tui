@@ -24,6 +24,11 @@ jobs:
       # Pins the MSRV (1.90.0) and restores the Cargo cache, same as release.
       - uses: ./.github/actions/setup-rust
 
+      # The action installs the toolchain with `--profile minimal`, which
+      # ships neither rustfmt nor clippy.
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
       - name: Install system dependencies (ALSA, OpenSSL)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
 
