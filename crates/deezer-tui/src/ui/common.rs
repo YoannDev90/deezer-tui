@@ -3,7 +3,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::client::{ClickTarget, ViewState};
 use crate::theme::Theme;
@@ -120,6 +120,14 @@ pub const STATUS_WIDTH: u16 = 3;
 /// Wall-clock origin of the animation, so every row pulses in phase regardless
 /// of when it was first drawn.
 static PULSE_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Deadline of the next pulse frame, aligned on the shared origin. The render
+/// loop only redraws at animation boundaries while playing, so every row still
+/// pulses in phase without redrawing at a fixed 20 fps.
+pub fn next_pulse_at() -> Instant {
+    let step = PULSE_ORIGIN.elapsed().as_millis() / PULSE_INTERVAL_MS + 1;
+    *PULSE_ORIGIN + Duration::from_millis((step * PULSE_INTERVAL_MS) as u64)
+}
 
 /// Marker for the current track: pulsing while it plays, a static pause glyph
 /// otherwise — a stopped animation would read as a frozen UI.

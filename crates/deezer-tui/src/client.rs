@@ -2244,6 +2244,10 @@ impl Client {
         let mut send_shutdown = false;
         let mut update_check_done = config.skip_update_check;
         let mut prev_over_image = false;
+        // Redraw only when something actually changed: input, a daemon
+        // message, an image arrival, or a timed effect (pulse, toast expiry).
+        // The first frame always draws.
+        let mut dirty = true;
 
         while running {
             ensure_raw_mode();
@@ -2251,32 +2255,50 @@ impl Client {
             // Clear expired toast
             if self.view.toast.as_ref().is_some_and(|t| t.is_expired()) {
                 self.view.toast = None;
+                dirty = true;
             }
 
-            // On image-capable terminals (sixel/kitty), a modal drawn over the
-            // cover image can leave remnants when it closes — the buffer diff
-            // skips re-emitting the image. Force a full redraw on the frame right
-            // after such a layer closes.
-            // On detail pages `overlay` is the detail itself, so only count
-            // layers drawn ON TOP of it: a popup, or a modal overlay that
-            // replaces the detail (which then sits in `overlay_stack`).
-            let over_image = self.view.cover_image.is_some()
-                && (self.view.popup.is_some()
-                    || !matches!(
-                        self.view.overlay,
-                        Some(Overlay::AlbumDetail { .. }) | Some(Overlay::ArtistDetail)
-                    ));
-            if prev_over_image && !over_image {
-                terminal.clear()?;
+            if dirty {
+                // On image-capable terminals (sixel/kitty), a modal drawn over the
+                // cover image can leave remnants when it closes — the buffer diff
+                // skips re-emitting the image. Force a full redraw on the frame right
+                // after such a layer closes.
+                // On detail pages `overlay` is the detail itself, so only count
+                // layers drawn ON TOP of it: a popup, or a modal overlay that
+                // replaces the detail (which then sits in `overlay_stack`).
+                let over_image = self.view.cover_image.is_some()
+                    && (self.view.popup.is_some()
+                        || !matches!(
+                            self.view.overlay,
+                            Some(Overlay::AlbumDetail { .. }) | Some(Overlay::ArtistDetail)
+                        ));
+                if prev_over_image && !over_image {
+                    terminal.clear()?;
+                }
+                prev_over_image = over_image;
+
+                terminal.draw(|frame| {
+                    ui::draw(frame, &mut self.view);
+                })?;
+                dirty = false;
             }
-            prev_over_image = over_image;
 
-            terminal.draw(|frame| {
-                ui::draw(frame, &mut self.view);
-            })?;
-
-            // Poll for input events (non-blocking with short timeout)
-            if event::poll(TICK_RATE)? {
+            // Sleep until the next deadline: an input event, a daemon message
+            // (bounded by TICK_RATE), the next pulse frame, or toast expiry.
+            let mut wake = Instant::now() + TICK_RATE;
+            // Whether a clock-driven frame is due (the pulse only): on timeout,
+            // that deadline alone must trigger a redraw.
+            let mut pulse_due = false;
+            if self.view.status == PlaybackStatus::Playing {
+                let pulse = ui::common::next_pulse_at();
+                pulse_due = pulse < wake;
+                wake = wake.min(pulse);
+            }
+            if let Some(toast) = &self.view.toast {
+                wake = wake.min(toast.created_at + toast.duration);
+            }
+            if event::poll(wake.saturating_duration_since(Instant::now()))? {
+                dirty = true;
                 let action = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -2401,6 +2423,10 @@ impl Client {
 
                 // Check if overlay changed (may need new cover image)
                 self.maybe_fetch_cover_image();
+            } else if pulse_due && Instant::now() >= wake {
+                // Woken by the pulse deadline, not by input: the animation
+                // frame changed by the clock alone.
+                dirty = true;
             }
 
             // Send any queued navigation overlay commands to the daemon
@@ -2424,6 +2450,7 @@ impl Client {
             // timeout here).
             match self.server_rx.try_recv() {
                 Ok(Ok(ServerMessage::Snapshot(snap))) => {
+                    dirty = true;
                     self.view.update_from_snapshot(snap);
                     self.update_terminal_title();
                     self.maybe_fetch_cover_image();
@@ -2434,19 +2461,23 @@ impl Client {
                     }
                 }
                 Ok(Ok(ServerMessage::Tick(tick))) => {
+                    dirty = true;
                     self.view.apply_tick(tick);
                     self.update_terminal_title();
                 }
                 Ok(Ok(ServerMessage::Error(err))) => {
+                    dirty = true;
                     self.view.set_status_msg(Some(format!("Error: {err}")));
                 }
                 Ok(Err(e)) => {
+                    dirty = true;
                     debug!("Read error from daemon: {e}");
                     self.view
                         .set_status_msg(Some(format!("Communication error: {e}")));
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Daemon disconnected
+                    dirty = true;
                     self.view
                         .set_status_msg(Some(t().daemon_disconnected.into()));
                     running = false;
@@ -2462,6 +2493,7 @@ impl Client {
                 if url == self.view.cover_image_url {
                     let proto = self.picker.new_resize_protocol(img);
                     self.view.cover_image = Some(proto);
+                    dirty = true;
                 }
             }
 
@@ -2474,6 +2506,7 @@ impl Client {
                             download_url,
                             selected: 0,
                         });
+                        dirty = true;
                     }
                     update_check_done = true;
                 }
