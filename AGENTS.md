@@ -235,7 +235,9 @@ Implemented in `deezer-core/src/decrypt.rs::fetch_master_key()`.
 - **Transport**: Unix domain socket at `<config_dir>/daemon.sock`
 - **Format**: Line-delimited JSON (newline-separated)
 - **Client → Daemon**: `Command` enum (GetSnapshot, Search, PlayFromSearch, TogglePause, etc.)
-- **Daemon → Client**: `ServerMessage::Snapshot(DaemonSnapshot)` — full state sent after every command + periodic ticks
+- **Daemon → Client**: `ServerMessage` — `Snapshot(DaemonSnapshot)` (full state), `Tick(PlaybackTick)` (position/status/volume only, ~80 bytes), or `Error(String)`
+- **Dirty check**: the daemon serializes each update and compares it with the last broadcast. Unchanged state is not re-sent at all; if only the volatile playback fields moved, a `Tick` goes out instead of the ~111 KB `Snapshot`. A structural change, an explicit `GetSnapshot`, or a lagging client always gets a full snapshot.
+- **Per-client bounded queue** (`CLIENT_QUEUE_LEN = 4`) + writer task: the main loop only `try_send`s, never does socket I/O, so a client that stops reading can't stall playback or the other clients. A full queue defers the message (`retry`) instead of dropping it.
 - All snapshot fields use `#[serde(default)]` for forward/backward compatibility
 
 ### Async Architecture (inside Daemon)
@@ -268,7 +270,9 @@ PlayerEngine stays on daemon's main thread (rodio/cpal are `!Send`). Audio fetch
 | `r` | Cycle repeat (Off → All → One) |
 | `L` / `Ctrl+L` | Like / favorite track (focused or playing) |
 | `+` / `-` | Volume up / down |
-| `m` / `x` | Open context menu for selected track |
+| `x` | Open context menu for selected track |
+| `m` | Toggle live lyrics overlay |
+| `i` | Toggle info modal (version, links) |
 | `a` | Open album detail for selected track |
 | `w` | Open waiting list (queue) |
 | `e` | Open equalizer |
@@ -277,7 +281,7 @@ PlayerEngine stays on daemon's main thread (rodio/cpal are `!Send`). Audio fetch
 | `g` | Shuffle play favorites |
 | `Ctrl+O` | Open settings (themes) |
 | `Ctrl+F` | Search / filter mode (same as `/`) |
-| `q` | Quit (sends Shutdown to daemon) |
+| `Ctrl+Q` | Quit (sends Shutdown to daemon); plain `q` only closes overlays |
 | `Ctrl+C` | Force quit |
 
 ### Queue / Waiting List (`w`)
