@@ -117,8 +117,7 @@ impl SavedState {
         let Some(path) = Self::file_path() else {
             return Ok(());
         };
-        let json = serde_json::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 

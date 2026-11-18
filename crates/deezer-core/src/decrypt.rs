@@ -139,7 +139,7 @@ pub fn derive_track_key(track_id: &str, master_key: &[u8; 16]) -> [u8; 16] {
 /// Deezer uses "BF_CBC_STRIPE": only every 3rd 2048-byte block is encrypted.
 /// Blocks 0, 3, 6, 9… are encrypted; blocks 1, 2, 4, 5, 7, 8… are cleartext.
 pub fn decrypt_stream(data: &mut [u8], track_key: &[u8; 16]) -> Result<(), DeezerError> {
-    for (block_idx, block) in data.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+    for (block_idx, block) in data.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
         decrypt_block(block, block_idx, track_key)?;
     }
     Ok(())
@@ -155,7 +155,7 @@ pub fn decrypt_block(
     block_idx: usize,
     track_key: &[u8; 16],
 ) -> Result<(), DeezerError> {
-    if block_idx % 3 != 0 || block.len() != BLOCK_SIZE {
+    if !block_idx.is_multiple_of(3) || block.len() != BLOCK_SIZE {
         return Ok(());
     }
     let bf = blowfish::Blowfish::new_from_slice(track_key)

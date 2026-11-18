@@ -221,8 +221,9 @@ pub fn shortcut_line(text: &'static str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Deezer logo in pixel art using Unicode block characters.
-/// Rendered in Deezer purple.
+// Deezer logo in pixel art using Unicode block characters.
+// Rendered in Deezer purple.
+// (Old halfblock rendering, kept for reference.)
 // pub fn deezer_logo() -> Paragraph<'static> {
 //     let logo = vec![
 //         Line::from(Span::styled(

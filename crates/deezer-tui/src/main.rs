@@ -562,14 +562,11 @@ fn start_with_fork(show_updated: bool) -> Result<()> {
             // Build tokio runtime AFTER fork (no inherited threads)
             let rt = build_daemon_runtime()?;
             rt.block_on(async {
-                match daemon::Daemon::new() {
-                    Ok(mut d) => {
-                        if let Err(e) = d.run().await {
-                            // Can't print, we redirected stderr — just exit
-                            let _ = e;
-                        }
+                if let Ok(mut d) = daemon::Daemon::new() {
+                    if let Err(e) = d.run().await {
+                        // Can't print, we redirected stderr — just exit
+                        let _ = e;
                     }
-                    Err(_) => {}
                 }
             });
 

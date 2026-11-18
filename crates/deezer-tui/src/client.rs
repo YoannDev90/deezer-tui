@@ -596,7 +596,7 @@ pub enum Overlay {
 
 impl NavOverlay {
     /// Convert a daemon-side NavOverlay into a client-side Overlay.
-    fn to_overlay(self) -> Overlay {
+    fn into_overlay(self) -> Overlay {
         match self {
             NavOverlay::ArtistDetail => Overlay::ArtistDetail,
             NavOverlay::AlbumDetail { from_artist } => Overlay::AlbumDetail { from_artist },
@@ -1104,12 +1104,12 @@ impl ViewState {
             login_input: String::new(),
             login_cursor: 0,
             popup: None,
-            overlay: snap.nav_overlay.clone().map(|n| n.to_overlay()),
+            overlay: snap.nav_overlay.clone().map(|n| n.into_overlay()),
             overlay_stack: snap
                 .nav_overlay_stack
                 .iter()
                 .cloned()
-                .map(|n| n.to_overlay())
+                .map(|n| n.into_overlay())
                 .collect(),
             nav_commands: Vec::new(),
             nav_synced_from_daemon: true, // initial snapshot was consumed in the constructor
@@ -1209,14 +1209,13 @@ impl ViewState {
     /// Returns true if the current overlay is a navigation overlay (or None).
     /// Used to decide whether to sync from daemon nav state.
     fn is_nav_or_none_overlay(&self) -> bool {
-        match &self.overlay {
-            None => true,
-            Some(Overlay::ArtistDetail)
-            | Some(Overlay::AlbumDetail { .. })
-            | Some(Overlay::PlaylistDetail { .. })
-            | Some(Overlay::GenreDetail { .. }) => true,
-            _ => false,
-        }
+        matches!(
+            &self.overlay,
+            None | Some(Overlay::ArtistDetail)
+                | Some(Overlay::AlbumDetail { .. })
+                | Some(Overlay::PlaylistDetail { .. })
+                | Some(Overlay::GenreDetail { .. })
+        )
     }
 
     /// Update from a new daemon snapshot, preserving local-only state.
@@ -1487,7 +1486,7 @@ impl ViewState {
         // afterwards. Reapplying every tick races with pending client-side pushes
         // (which are async to the daemon) and causes flicker + loss of stack state.
         if !self.nav_synced_from_daemon && self.is_nav_or_none_overlay() {
-            let new_overlay = snap.nav_overlay.map(|n| n.to_overlay());
+            let new_overlay = snap.nav_overlay.map(|n| n.into_overlay());
             // Preserve client-side `selected` for PlaylistDetail: the daemon only
             // tracks that the overlay *exists*, not the cursor position within it.
             // Without this, every 250ms tick would reset selected to 0.
@@ -1516,7 +1515,7 @@ impl ViewState {
                 .into_iter()
                 .enumerate()
                 .map(|(i, n)| {
-                    let new = n.to_overlay();
+                    let new = n.into_overlay();
                     match (new, prev_stack.get(i)) {
                         (
                             Overlay::GenreDetail { .. },
@@ -2405,7 +2404,7 @@ impl Client {
             }
 
             // Send any queued navigation overlay commands to the daemon
-            let nav_cmds: Vec<Command> = self.view.nav_commands.drain(..).collect();
+            let nav_cmds: Vec<Command> = std::mem::take(&mut self.view.nav_commands);
             for cmd in &nav_cmds {
                 if let Err(e) = self.send_cmd(cmd).await {
                     debug!("Send nav command error: {e}");
@@ -5729,6 +5728,10 @@ fn with_selection(select: Option<Command>, action: KeyAction) -> KeyAction {
 }
 
 /// Result of handling a key press.
+// `SendCommand` carries a full `Command` (~304 bytes): a key handler returns
+// this once, it is acted on and dropped — boxing it would cost an allocation
+// per keypress for nothing.
+#[allow(clippy::large_enum_variant)]
 enum KeyAction {
     /// Do nothing special.
     Continue,

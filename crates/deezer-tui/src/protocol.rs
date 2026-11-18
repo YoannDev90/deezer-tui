@@ -198,6 +198,9 @@ pub enum Command {
 /// Navigation overlays that are persisted in the daemon across client reconnections.
 /// Only content-detail views that correspond to loaded daemon data belong here.
 /// Pure UI overlays (Help, Settings, WaitingList, etc.) stay client-side only.
+// Variant names are wire format: renaming one would break IPC with older
+// daemons/clients, so the shared `Detail` postfix stays.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NavOverlay {
     ArtistDetail,
@@ -240,6 +243,10 @@ impl GenreDetailSubTab {
 }
 
 /// Messages sent from the daemon to the TUI client.
+// The snapshot variant is ~1.6 KB, but a message is built once, serialized
+// immediately and never cloned in a loop — boxing it would only add an
+// allocation on the hot path for no gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Full state snapshot.

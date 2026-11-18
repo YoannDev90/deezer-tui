@@ -454,7 +454,12 @@ async fn pump(
         }
         let mut blocks: Vec<u8> = pending.drain(..whole).collect();
         let first_block = written / BLOCK_SIZE;
-        for (i, block) in blocks.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        for (i, block) in blocks
+            .as_chunks_mut::<BLOCK_SIZE>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             decrypt::decrypt_block(block, first_block + i, track_key)?;
         }
         written = buf.append(&blocks).map_err(cache_error)?;

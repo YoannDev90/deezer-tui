@@ -355,9 +355,9 @@ impl Daemon {
             })
             .unwrap_or(false);
 
-        let screen = if is_offline {
-            Screen::Main
-        } else if config.arl.is_some() {
+        // Offline → straight to Main (best effort); otherwise login is
+        // required only when no ARL is configured.
+        let screen = if is_offline || config.arl.is_some() {
             Screen::Main
         } else {
             Screen::Login

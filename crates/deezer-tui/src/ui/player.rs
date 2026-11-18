@@ -63,7 +63,7 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
                 Span::styled("L", Theme::shortcut_key()),
                 Span::styled(" - ", Theme::dim()),
                 Span::styled(&track.artist, Style::default().fg(Theme::primary())),
-                Span::styled(format!("  ({})", &track.album), Theme::dim()),
+                Span::styled(format!("  ({})", track.album), Theme::dim()),
             ]),
             Line::from(Span::styled(
                 format!("[{}] ", view.quality.as_api_format()),

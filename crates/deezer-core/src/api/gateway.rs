@@ -47,7 +47,7 @@ impl DeezerClient {
 
         // Check for API-level errors
         if let Some(error) = body.get("error") {
-            if !error.as_object().map_or(true, |o| o.is_empty()) {
+            if !error.as_object().is_none_or(|o| o.is_empty()) {
                 return Err(DeezerError::Api(error.to_string()));
             }
         }
@@ -83,7 +83,7 @@ impl DeezerClient {
             .map_err(|e| DeezerError::Http(e.to_string()))?;
 
         if let Some(error) = body.get("error") {
-            if !error.as_object().map_or(true, |o| o.is_empty()) {
+            if !error.as_object().is_none_or(|o| o.is_empty()) {
                 return Err(DeezerError::Api(error.to_string()));
             }
         }
@@ -1656,7 +1656,7 @@ fn extract_history_tracks(node: &serde_json::Value) -> Option<Vec<TrackData>> {
         if out.is_empty() {
             return None;
         }
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
         return Some(out.into_iter().map(|(_, t)| t).collect());
     }
 
@@ -1671,7 +1671,7 @@ fn extract_history_tracks(node: &serde_json::Value) -> Option<Vec<TrackData>> {
         return None;
     }
     if out.iter().any(|(ts, _)| ts.is_some()) {
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
     }
     Some(out.into_iter().map(|(_, t)| t).collect())
 }

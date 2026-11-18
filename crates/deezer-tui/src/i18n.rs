@@ -2530,13 +2530,13 @@ pub fn set(locale: Locale) {
 pub fn current_locale() -> Locale {
     let current = CURRENT_STRINGS.with(|c| c.get());
     let ptr = current as *const Strings;
-    if ptr == &EN as *const Strings {
+    if std::ptr::eq(ptr, &EN) {
         Locale::English
-    } else if ptr == &FR as *const Strings {
+    } else if std::ptr::eq(ptr, &FR) {
         Locale::French
-    } else if ptr == &ES as *const Strings {
+    } else if std::ptr::eq(ptr, &ES) {
         Locale::Spanish
-    } else if ptr == &PT as *const Strings {
+    } else if std::ptr::eq(ptr, &PT) {
         Locale::Portuguese
     } else {
         Locale::German
