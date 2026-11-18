@@ -1,0 +1,40 @@
+name: CI
+
+# Runs on every push and pull request: formatting, lints, build and tests.
+# Previously CircleCI had this role, but it only runs on the upstream repo —
+# pushes here were only checked at release time (and clippy could not fail
+# anyway because of `|| true`).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per ref: a new push cancels the in-flight run for the same branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: fmt · clippy · build · test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pins the MSRV (1.90.0) and restores the Cargo cache, same as release.
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install system dependencies (ALSA, OpenSSL)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
