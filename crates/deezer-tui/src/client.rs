@@ -39,7 +39,7 @@ use deezer_core::offline::OfflineTrack;
 use crate::protocol::{
     pid_path, read_line, socket_path, ActiveTab, Command, DaemonSnapshot, ExploreCategory,
     FavoritesCategory, GenreDetailSubTab, GenreItem, MoodEntry, NavOverlay, OfflineCategory,
-    RadioItem, Screen, SearchCategory, ServerMessage,
+    PlaybackTick, RadioItem, Screen, SearchCategory, ServerMessage,
 };
 use crate::terminal_text::sanitize;
 use crate::theme::{Theme, ThemeId};
@@ -1377,6 +1377,20 @@ impl ViewState {
         }
     }
 
+    /// Apply a playback tick: the volatile fields only. Everything else in the
+    /// view is untouched — the daemon sends a tick only when the rest of the
+    /// state is byte-identical to what was last broadcast.
+    fn apply_tick(&mut self, tick: PlaybackTick) {
+        self.status = tick.status;
+        self.position_secs = tick.position_secs;
+        self.position_ms = if tick.position_ms > 0 {
+            tick.position_ms
+        } else {
+            tick.position_secs.saturating_mul(1000)
+        };
+        self.volume = tick.volume;
+    }
+
     fn update_from_snapshot(&mut self, snap: DaemonSnapshot) {
         let prev_screen = self.screen;
         let prev_track_id = self.current_track.as_ref().map(|t| t.track_id.clone());
@@ -2419,6 +2433,10 @@ impl Client {
                             debug!("Send lyrics command error: {e}");
                         }
                     }
+                }
+                Ok(Ok(ServerMessage::Tick(tick))) => {
+                    self.view.apply_tick(tick);
+                    self.update_terminal_title();
                 }
                 Ok(Ok(ServerMessage::Error(err))) => {
                     self.view.set_status_msg(Some(format!("Error: {err}")));

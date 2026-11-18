@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Far less idle CPU and traffic: the TUI stops receiving full state updates several times a second while nothing changes
+- Playing a track no longer resends the whole TUI state several times a second: only the playback position travels, a few dozen bytes instead of ~110 KB
 
 ### Fixed
 - A TUI window that stops responding can no longer stall playback for every other window

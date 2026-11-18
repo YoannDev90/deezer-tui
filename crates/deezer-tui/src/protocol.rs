@@ -244,8 +244,26 @@ impl GenreDetailSubTab {
 pub enum ServerMessage {
     /// Full state snapshot.
     Snapshot(DaemonSnapshot),
+    /// Only the fields that move several times a second while a track plays.
+    /// Sent instead of a full snapshot when nothing else changed, so playback
+    /// costs ~60 bytes per tick instead of ~111 KB.
+    Tick(PlaybackTick),
     /// Error message.
     Error(String),
+}
+
+/// The volatile slice of the snapshot: everything that changes on every tick
+/// during playback. The daemon sends this alone when the rest is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackTick {
+    #[serde(default)]
+    pub status: PlaybackStatus,
+    #[serde(default)]
+    pub position_secs: u64,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
 }
 
 /// Screen the daemon is on (login vs main).

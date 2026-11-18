@@ -23,8 +23,8 @@ use crate::favorites_cache::FavoritesCache;
 use crate::i18n::t;
 use crate::protocol::{
     pid_path, read_line, socket_path, ActiveTab, Command, DaemonSnapshot, ExploreCategory,
-    FavoritesCategory, GenreItem, MoodEntry, OfflineCategory, RadioItem, Screen, SearchCategory,
-    ServerMessage,
+    FavoritesCategory, GenreItem, MoodEntry, OfflineCategory, PlaybackTick, RadioItem, Screen,
+    SearchCategory, ServerMessage,
 };
 use deezer_core::api::models::GenreDetail;
 
@@ -521,9 +521,9 @@ impl Daemon {
         // Writers are kept in a shared map; snapshots are broadcast to all clients.
         let clients: ClientWriters = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let mut next_client_id: u64 = 0;
-        // Serialized bytes of the last broadcast, and clients that refused it.
-        // Both feed `broadcast_snapshot`'s dirty check (see there).
-        let mut last_broadcast: Option<Arc<Vec<u8>>> = None;
+        // What was last broadcast, and clients that refused it. Both feed
+        // `broadcast_snapshot`'s dirty check (see there).
+        let mut broadcast_state = BroadcastState::default();
         let mut retry: Vec<u64> = Vec::new();
         let (client_cmd_tx, mut client_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u64, Option<Command>)>();
@@ -645,7 +645,7 @@ impl Daemon {
                             broadcast_snapshot(
                                 &clients,
                                 snap,
-                                &mut last_broadcast,
+                                &mut broadcast_state,
                                 &mut retry,
                                 force,
                             )
@@ -671,7 +671,7 @@ impl Daemon {
                     self.handle_command(command);
 
                     let snap = self.snapshot();
-                    broadcast_snapshot(&clients, snap, &mut last_broadcast, &mut retry, false)
+                    broadcast_snapshot(&clients, snap, &mut broadcast_state, &mut retry, false)
                         .await;
                     self.mpris_refresh().await;
 
@@ -690,7 +690,7 @@ impl Daemon {
                     // nothing changed since the last one — at rest this tick
                     // used to push a full ~190 KB snapshot four times a second.
                     let snap = self.snapshot();
-                    broadcast_snapshot(&clients, snap, &mut last_broadcast, &mut retry, false)
+                    broadcast_snapshot(&clients, snap, &mut broadcast_state, &mut retry, false)
                         .await;
                     self.mpris_refresh().await;
                 }
@@ -4277,38 +4277,84 @@ fn serialize_line<T: serde::Serialize>(msg: &T) -> Option<Vec<u8>> {
     Some(json.into_bytes())
 }
 
-/// Broadcast a snapshot to every connected client.
+/// What the daemon last put on the wire, for `broadcast_snapshot`'s dirty
+/// check: the stable bytes (the snapshot minus the volatile fields) and the
+/// volatile tick itself.
+#[derive(Default)]
+struct BroadcastState {
+    stable: Option<Arc<Vec<u8>>>,
+    tick: Option<PlaybackTick>,
+}
+
+/// Broadcast a state update to every connected client.
 ///
 /// One serialization, then one `try_send` per client: no socket I/O ever
 /// happens on the main loop, so a client that stops reading cannot stall
 /// ticks, playback or the other clients. A client whose queue is full gets
-/// the next snapshot re-sent (`retry`), because dropping one silently would
+/// the next message re-sent (`retry`), because dropping one silently would
 /// leave it permanently a step behind while the state stands still.
 ///
-/// The broadcast is skipped entirely when the serialized state is identical
-/// to the last one — snapshots are full-state, so every client already holds
-/// that exact state. That is the common case: the tick fires every 250 ms
-/// whether or not anything moved. `force` answers an explicit `GetSnapshot`.
+/// Two payload sizes:
+/// - only the volatile fields moved (position ticking along, pause, volume)
+///   → a ~60-byte [`ServerMessage::Tick`];
+/// - anything else changed → the full [`ServerMessage::Snapshot`].
+///
+/// Nothing is sent when neither moved — the tick fires every 250 ms whether
+/// or not anything moved. `force` answers an explicit `GetSnapshot`, and a
+/// flagged client always re-syncs on a full snapshot.
 async fn broadcast_snapshot(
     clients: &ClientWriters,
-    snap: DaemonSnapshot,
-    last: &mut Option<Arc<Vec<u8>>>,
+    mut snap: DaemonSnapshot,
+    state: &mut BroadcastState,
     retry: &mut Vec<u64>,
     force: bool,
 ) {
-    let Some(bytes) = serialize_line(&ServerMessage::Snapshot(snap)) else {
+    // The volatile fields are all `Copy`: stash them, zero them for the
+    // stable comparison, restore them for the full snapshot if one goes out.
+    let tick = PlaybackTick {
+        status: snap.status,
+        position_secs: snap.position_secs,
+        position_ms: snap.position_ms,
+        volume: snap.volume,
+    };
+    snap.status = PlaybackStatus::default();
+    snap.position_secs = 0;
+    snap.position_ms = 0;
+    snap.volume = 0.0;
+    let Some(stable_bytes) = serialize_line(&snap) else {
         return;
     };
-    let bytes = Arc::new(bytes);
-    let unchanged = last
+    snap.status = tick.status;
+    snap.position_secs = tick.position_secs;
+    snap.position_ms = tick.position_ms;
+    snap.volume = tick.volume;
+
+    let stable_unchanged = state
+        .stable
         .as_ref()
-        .is_some_and(|prev| prev.as_slice() == bytes.as_slice());
-    if unchanged && !force && retry.is_empty() {
+        .is_some_and(|prev| prev.as_slice() == stable_bytes.as_slice());
+    let tick_unchanged = state.tick == Some(tick);
+    if stable_unchanged && tick_unchanged && !force && retry.is_empty() {
         return;
     }
-    if !unchanged {
-        *last = Some(Arc::clone(&bytes));
-    }
+
+    let bytes = if stable_unchanged && !force && retry.is_empty() {
+        // Only playback moved: send the tick, not 111 KB of lists.
+        let Some(bytes) = serialize_line(&ServerMessage::Tick(tick)) else {
+            return;
+        };
+        state.tick = Some(tick);
+        bytes
+    } else {
+        // Something structural changed, or a client needs re-syncing.
+        let Some(bytes) = serialize_line(&ServerMessage::Snapshot(snap)) else {
+            return;
+        };
+        state.stable = Some(Arc::new(stable_bytes));
+        state.tick = Some(tick);
+        bytes
+    };
+    let bytes = Arc::new(bytes);
 
     let mut dead = Vec::new();
     let mut lagging = Vec::new();
@@ -4318,7 +4364,7 @@ async fn broadcast_snapshot(
             match tx.try_send(Arc::clone(&bytes)) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    debug!(client_id = *id, "client queue full, snapshot deferred");
+                    debug!(client_id = *id, "client queue full, update deferred");
                     lagging.push(*id);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => dead.push(*id),
@@ -4553,7 +4599,8 @@ async fn fetch_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        broadcast_snapshot, forward_candidates, playlist_queue, shuffled_indices, ClientWriters,
+        broadcast_snapshot, forward_candidates, playlist_queue, shuffled_indices, BroadcastState,
+        ClientWriters,
     };
     use crate::protocol::{DaemonSnapshot, ServerMessage};
     use deezer_core::api::models::TrackData;
@@ -4700,38 +4747,42 @@ mod tests {
 
     /// Pop the next queued message and assert it is one well-formed JSON line.
     fn take_message(rx: &mut mpsc::Receiver<Arc<Vec<u8>>>) -> DaemonSnapshot {
-        let bytes = rx.try_recv().expect("a snapshot was expected here");
-        assert!(bytes.ends_with(b"\n"), "messages are line-delimited");
-        let msg: ServerMessage =
-            serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("valid JSON");
+        let msg = take_server_message(rx);
         match msg {
             ServerMessage::Snapshot(snap) => snap,
+            ServerMessage::Tick(t) => panic!("expected a snapshot, got a tick: {t:?}"),
             ServerMessage::Error(e) => panic!("unexpected error message: {e}"),
         }
+    }
+
+    fn take_server_message(rx: &mut mpsc::Receiver<Arc<Vec<u8>>>) -> ServerMessage {
+        let bytes = rx.try_recv().expect("a message was expected here");
+        assert!(bytes.ends_with(b"\n"), "messages are line-delimited");
+        serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("valid JSON")
     }
 
     #[tokio::test]
     async fn an_unchanged_snapshot_is_not_broadcast_again() {
         let clients = empty_clients();
         let mut rx = add_client(&clients, 0, 4).await;
-        let mut last = None;
+        let mut state = BroadcastState::default();
         let mut retry = Vec::new();
         let snap = DaemonSnapshot::default();
 
-        broadcast_snapshot(&clients, snap.clone(), &mut last, &mut retry, false).await;
+        broadcast_snapshot(&clients, snap.clone(), &mut state, &mut retry, false).await;
         assert_eq!(take_message(&mut rx).position_secs, 0);
 
         // Same state, new tick: the daemon must send nothing at all. This is
         // the whole point of the dirty check — the tick fires every 250 ms
         // whether or not anything moved.
-        broadcast_snapshot(&clients, snap.clone(), &mut last, &mut retry, false).await;
+        broadcast_snapshot(&clients, snap.clone(), &mut state, &mut retry, false).await;
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Empty)),
             "identical state must not be re-sent"
         );
 
         // …but an explicit snapshot request is always answered.
-        broadcast_snapshot(&clients, snap, &mut last, &mut retry, true).await;
+        broadcast_snapshot(&clients, snap, &mut state, &mut retry, true).await;
         take_message(&mut rx);
     }
 
@@ -4740,13 +4791,13 @@ mod tests {
         let clients = empty_clients();
         let mut first = add_client(&clients, 0, 4).await;
         let mut second = add_client(&clients, 1, 4).await;
-        let mut last = None;
+        let mut state = BroadcastState::default();
         let mut retry = Vec::new();
 
         broadcast_snapshot(
             &clients,
             DaemonSnapshot::default(),
-            &mut last,
+            &mut state,
             &mut retry,
             false,
         )
@@ -4754,55 +4805,107 @@ mod tests {
         take_message(&mut first);
         take_message(&mut second);
 
+        // A structural change (not just playback movement) goes out as a full
+        // snapshot so every client sees the new lists too.
         let moved = DaemonSnapshot {
-            position_secs: 42,
+            status_msg: Some("hello".into()),
             ..DaemonSnapshot::default()
         };
-        broadcast_snapshot(&clients, moved, &mut last, &mut retry, false).await;
-        assert_eq!(take_message(&mut first).position_secs, 42);
-        assert_eq!(take_message(&mut second).position_secs, 42);
+        broadcast_snapshot(&clients, moved, &mut state, &mut retry, false).await;
+        assert_eq!(
+            take_message(&mut first).status_msg.as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            take_message(&mut second).status_msg.as_deref(),
+            Some("hello")
+        );
     }
 
     #[tokio::test]
-    async fn a_full_client_queue_defers_the_snapshot_instead_of_dropping_it() {
+    async fn only_playback_movement_sends_a_tiny_tick() {
+        let clients = empty_clients();
+        let mut rx = add_client(&clients, 0, 4).await;
+        let mut state = BroadcastState::default();
+        let mut retry = Vec::new();
+
+        broadcast_snapshot(
+            &clients,
+            DaemonSnapshot::default(),
+            &mut state,
+            &mut retry,
+            false,
+        )
+        .await;
+        take_message(&mut rx);
+
+        // Position advanced: the lists did not move, so a tick goes out
+        // instead of the full ~111 KB snapshot.
+        let moved = DaemonSnapshot {
+            position_secs: 42,
+            position_ms: 42_000,
+            ..DaemonSnapshot::default()
+        };
+        broadcast_snapshot(&clients, moved, &mut state, &mut retry, false).await;
+        let bytes = rx.try_recv().expect("a tick was expected here");
+        assert!(
+            bytes.len() < 256,
+            "a tick must stay tiny, got {} bytes",
+            bytes.len()
+        );
+        let msg: ServerMessage =
+            serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("valid JSON");
+        match msg {
+            ServerMessage::Tick(tick) => {
+                assert_eq!(tick.position_secs, 42);
+                assert_eq!(tick.position_ms, 42_000);
+            }
+            ServerMessage::Snapshot(_) => panic!("movement must not resend a full snapshot"),
+            ServerMessage::Error(e) => panic!("unexpected error message: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_client_queue_defers_the_message_instead_of_dropping_it() {
         let clients = empty_clients();
         // Capacity 1: the stand-in client never reads, so it fills up at once.
         let mut rx = add_client(&clients, 7, 1).await;
-        let mut last = None;
+        let mut state = BroadcastState::default();
         let mut retry = Vec::new();
 
         // First snapshot sits unread in the queue.
         broadcast_snapshot(
             &clients,
             DaemonSnapshot::default(),
-            &mut last,
+            &mut state,
             &mut retry,
             false,
         )
         .await;
 
-        // The state then changes while the queue is still full: the snapshot
+        // The state then changes while the queue is still full: the message
         // is deferred, not pushed onto a full queue, and the client is flagged.
         let moved = DaemonSnapshot {
             position_secs: 42,
             ..DaemonSnapshot::default()
         };
-        broadcast_snapshot(&clients, moved.clone(), &mut last, &mut retry, false).await;
+        broadcast_snapshot(&clients, moved.clone(), &mut state, &mut retry, false).await;
         assert_eq!(
             retry,
             vec![7],
-            "a client that refused a snapshot must be flagged for a re-send"
+            "a client that refused an update must be flagged for a re-send"
         );
 
-        // Draining the backlog leaves the queue empty: only the first
-        // snapshot ever made it through, the deferred one did not.
+        // Draining the backlog leaves the queue empty: only the first snapshot
+        // ever made it through, the deferred one did not.
         assert_eq!(take_message(&mut rx).position_secs, 0);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 
         // Because the client is flagged, the state is re-sent even though it
         // did not change since — otherwise the dropped update would leave it
-        // a step behind for as long as the state stands still.
-        broadcast_snapshot(&clients, moved, &mut last, &mut retry, false).await;
+        // a step behind for as long as the state stands still. A flagged
+        // client re-syncs on a full snapshot, never a bare tick.
+        broadcast_snapshot(&clients, moved, &mut state, &mut retry, false).await;
         assert_eq!(take_message(&mut rx).position_secs, 42);
         assert!(retry.is_empty(), "the client is caught up");
     }
@@ -4814,12 +4917,12 @@ mod tests {
         drop(rx); // the writer task would fail on its first write
         clients.lock().await.insert(3, tx);
 
-        let mut last = None;
+        let mut state = BroadcastState::default();
         let mut retry = Vec::new();
         broadcast_snapshot(
             &clients,
             DaemonSnapshot::default(),
-            &mut last,
+            &mut state,
             &mut retry,
             false,
         )
