@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Far less idle CPU and traffic: the TUI stops receiving full state updates several times a second while nothing changes
+
 ### Fixed
+- A TUI window that stops responding can no longer stall playback for every other window
 - Live lyrics always came back empty ("No lyrics available for this track"): Deezer's gw-light `song.getLyrics` now answers `DATA_ERROR` for every track, so lyrics are fetched from the GraphQL `track { lyrics }` field instead
 - The status bar no longer claims "Lyrics loaded" when the track has no lyrics
 - Live lyrics no longer fail with "Given jwt token is not valid anymore"
