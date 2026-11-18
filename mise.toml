@@ -1,0 +1,58 @@
+# Project tooling — `mise install`.
+# Versions are pinned, not "latest": everyone (and CI) must get the exact same
+[tools]
+rust = "1.88.0"
+pre-commit = "4.6.2"
+
+[tasks.build]
+description = "Build the binary in debug mode"
+run = "cargo build"
+
+[tasks.check]
+description = "Check the project (type + lint)"
+run = "cargo check"
+
+[tasks.test]
+description = "Run tests"
+run = "cargo test"
+
+[tasks.test-ui]
+description = "Run UI tests (if any)"
+run = "cargo test --test '*'"
+
+[tasks.clippy]
+description = "Run clippy linter"
+run = "cargo clippy"
+
+[tasks.fmt]
+description = "Format code with rustfmt"
+run = "cargo fmt"
+
+[tasks.run]
+description = "Run the TUI application"
+run = "cargo run"
+
+[tasks.install]
+description = "Install the binary to PATH"
+run = "cargo install --path deezer-tui"
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
+
+[tasks.lint]
+description = "Run all linting checks"
+depends = ["check", "clippy"]
+run = ""
+
+[tasks.pretty-lint]
+description = "Run clippy only"
+depends = ["clippy"]
+run = ""
+
+[tasks.setup-hooks]
+run = "pre-commit install && pre-commit install --hook-type commit-msg"
+description = "Install git hooks"
+
+[hooks]
+postinstall = "mise setup-hooks"
