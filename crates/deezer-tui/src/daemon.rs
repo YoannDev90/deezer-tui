@@ -30,6 +30,18 @@ use deezer_core::api::models::GenreDetail;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 
+/// Outbound queue of one connected client: the already-serialized bytes its
+/// writer task has yet to put on the socket.
+type ClientQueue = tokio::sync::mpsc::Sender<Arc<Vec<u8>>>;
+
+/// Every connected client, by id, with the queue its writer task drains.
+type ClientWriters = Arc<tokio::sync::Mutex<HashMap<u64, ClientQueue>>>;
+
+/// Snapshots allowed to pile up for one client before newer ones are deferred
+/// to the next tick. Small on purpose: a snapshot is full-state, so the newest
+/// one supersedes everything queued before it.
+const CLIENT_QUEUE_LEN: usize = 4;
+
 /// Distance kept from the end of the downloaded part when seeking a track that
 /// is still streaming: bytes map to time only roughly (FLAC is VBR).
 const SEEK_SAFETY_MARGIN_SECS: u64 = 5;
@@ -507,13 +519,12 @@ impl Daemon {
         // Main daemon loop — supports multiple concurrent clients.
         // Each client has a spawned reader task that pushes commands into a channel.
         // Writers are kept in a shared map; snapshots are broadcast to all clients.
-        type ClientWriters = Arc<
-            tokio::sync::Mutex<
-                HashMap<u64, Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>,
-            >,
-        >;
         let clients: ClientWriters = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let mut next_client_id: u64 = 0;
+        // Serialized bytes of the last broadcast, and clients that refused it.
+        // Both feed `broadcast_snapshot`'s dirty check (see there).
+        let mut last_broadcast: Option<Arc<Vec<u8>>> = None;
+        let mut retry: Vec<u64> = Vec::new();
         let (client_cmd_tx, mut client_cmd_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u64, Option<Command>)>();
 
@@ -553,11 +564,34 @@ impl Daemon {
                             info!(client_id = id, "Client connected");
 
                             let (read_half, write_half) = stream.into_split();
-                            let writer = Arc::new(tokio::sync::Mutex::new(write_half));
+                            let (tx, mut rx) =
+                                tokio::sync::mpsc::channel::<Arc<Vec<u8>>>(CLIENT_QUEUE_LEN);
 
                             // Register the client BEFORE any I/O so one-shot commands
                             // (which disconnect immediately after writing) are always read.
-                            clients.lock().await.insert(id, writer.clone());
+                            clients.lock().await.insert(id, tx.clone());
+
+                            // Writer task: owns the write half and drains the queue.
+                            // The main loop only ever `try_send`s, so a client that
+                            // stops reading fills its own queue instead of stalling
+                            // ticks, playback and other clients.
+                            let clients_for_writer = Arc::clone(&clients);
+                            tokio::spawn(async move {
+                                use tokio::io::AsyncWriteExt;
+                                let mut writer = write_half;
+                                let mut failed = false;
+                                while let Some(bytes) = rx.recv().await {
+                                    if writer.write_all(&bytes).await.is_err()
+                                        || writer.flush().await.is_err()
+                                    {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                if failed {
+                                    clients_for_writer.lock().await.remove(&id);
+                                }
+                            });
 
                             // Spawn reader task for this client
                             let cmd_tx = client_cmd_tx.clone();
@@ -578,14 +612,15 @@ impl Daemon {
                                 }
                             });
 
-                            // Best-effort initial snapshot. One-shot clients (`-n`/`-b`/`-p`)
-                            // may have already disconnected — that's fine, the reader task
-                            // will still deliver their command from the kernel buffer.
+                            // Best-effort initial snapshot, queued like any other
+                            // message: one-shot clients (`-n`/`-b`/`-p`) may have
+                            // already disconnected, and writing inline here would
+                            // block the main loop on a client that never reads.
                             let snap = self.snapshot();
-                            let msg = ServerMessage::Snapshot(snap);
-                            let mut w = writer.lock().await;
-                            if let Err(e) = send_line_writer(&mut *w, &msg).await {
-                                debug!(client_id = id, "Initial snapshot failed (likely one-shot client): {e}");
+                            if let Some(bytes) = serialize_line(&ServerMessage::Snapshot(snap)) {
+                                if tx.try_send(Arc::new(bytes)).is_err() {
+                                    debug!(client_id = id, "Initial snapshot not queued (likely one-shot client)");
+                                }
                             }
                         }
                         Err(e) => {
@@ -600,11 +635,21 @@ impl Daemon {
                         Some(command) => {
                             debug!(client_id = id, ?command, "Received command");
                             let should_shutdown = matches!(command, Command::Shutdown);
+                            // A snapshot request is a promise: answer it even when
+                            // the state happens to match the last broadcast.
+                            let force = matches!(command, Command::GetSnapshot);
                             self.handle_command(command);
 
                             // Broadcast snapshot to all clients
                             let snap = self.snapshot();
-                            broadcast_snapshot(&clients, snap).await;
+                            broadcast_snapshot(
+                                &clients,
+                                snap,
+                                &mut last_broadcast,
+                                &mut retry,
+                                force,
+                            )
+                            .await;
                             self.mpris_refresh().await;
 
                             if should_shutdown {
@@ -626,7 +671,8 @@ impl Daemon {
                     self.handle_command(command);
 
                     let snap = self.snapshot();
-                    broadcast_snapshot(&clients, snap).await;
+                    broadcast_snapshot(&clients, snap, &mut last_broadcast, &mut retry, false)
+                        .await;
                     self.mpris_refresh().await;
 
                     if should_shutdown {
@@ -640,13 +686,20 @@ impl Daemon {
                     self.process_async_results();
                     self.on_tick();
 
-                    // Broadcast periodic snapshot to all clients
+                    // Broadcast periodic snapshot to all clients. Skipped when
+                    // nothing changed since the last one — at rest this tick
+                    // used to push a full ~190 KB snapshot four times a second.
                     let snap = self.snapshot();
-                    broadcast_snapshot(&clients, snap).await;
+                    broadcast_snapshot(&clients, snap, &mut last_broadcast, &mut retry, false)
+                        .await;
                     self.mpris_refresh().await;
                 }
             }
         }
+
+        // Drop every queued snapshot so the writer tasks see closed channels
+        // and exit instead of waiting on a receiver nobody feeds anymore.
+        clients.lock().await.clear();
 
         // Cleanup
         let _ = std::fs::remove_file(&sock_path);
@@ -1379,12 +1432,10 @@ impl Daemon {
             lyrics_loading: self.lyrics_loading,
             queue: state.queue.clone(),
             queue_index: state.queue_index,
-            search_results: self.search_results.clone(),
             search_selected: self.search_selected,
             search_loading: self.search_loading,
             search_category: self.search_category,
             search_display: self.search_display.clone(),
-            favorites: self.favorites.clone(),
             favorites_selected: self.favorites_selected,
             favorites_loading: self.favorites_loading,
             favorites_category: self.favorites_category,
@@ -4218,52 +4269,63 @@ impl Daemon {
     }
 }
 
-/// Send a line-delimited JSON message over a write half.
-async fn send_line_writer<T: serde::Serialize>(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    msg: &T,
-) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let mut json = serde_json::to_string(msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+/// Serialize a message as one line of JSON, ready for the socket. `None` only
+/// if serialization fails, which nothing in `ServerMessage` can trigger today.
+fn serialize_line<T: serde::Serialize>(msg: &T) -> Option<Vec<u8>> {
+    let mut json = serde_json::to_string(msg).ok()?;
     json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await
+    Some(json.into_bytes())
 }
 
-/// Broadcast a snapshot to every connected client. Serializes once, writes to all.
-/// Dead clients (write errors) are removed from the map.
+/// Broadcast a snapshot to every connected client.
+///
+/// One serialization, then one `try_send` per client: no socket I/O ever
+/// happens on the main loop, so a client that stops reading cannot stall
+/// ticks, playback or the other clients. A client whose queue is full gets
+/// the next snapshot re-sent (`retry`), because dropping one silently would
+/// leave it permanently a step behind while the state stands still.
+///
+/// The broadcast is skipped entirely when the serialized state is identical
+/// to the last one — snapshots are full-state, so every client already holds
+/// that exact state. That is the common case: the tick fires every 250 ms
+/// whether or not anything moved. `force` answers an explicit `GetSnapshot`.
 async fn broadcast_snapshot(
-    clients: &Arc<
-        tokio::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>>,
-    >,
+    clients: &ClientWriters,
     snap: DaemonSnapshot,
+    last: &mut Option<Arc<Vec<u8>>>,
+    retry: &mut Vec<u64>,
+    force: bool,
 ) {
-    let msg = ServerMessage::Snapshot(snap);
-    let mut json = match serde_json::to_string(&msg) {
-        Ok(s) => s,
-        Err(_) => return,
+    let Some(bytes) = serialize_line(&ServerMessage::Snapshot(snap)) else {
+        return;
     };
-    json.push('\n');
-    let bytes = json.into_bytes();
-
-    // Collect writers outside the map lock to avoid holding it during I/O.
-    let writers: Vec<(
-        u64,
-        Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    )> = {
-        let g = clients.lock().await;
-        g.iter().map(|(k, v)| (*k, v.clone())).collect()
-    };
+    let bytes = Arc::new(bytes);
+    let unchanged = last
+        .as_ref()
+        .is_some_and(|prev| prev.as_slice() == bytes.as_slice());
+    if unchanged && !force && retry.is_empty() {
+        return;
+    }
+    if !unchanged {
+        *last = Some(Arc::clone(&bytes));
+    }
 
     let mut dead = Vec::new();
-    for (id, w) in writers {
-        use tokio::io::AsyncWriteExt;
-        let mut guard = w.lock().await;
-        if guard.write_all(&bytes).await.is_err() || guard.flush().await.is_err() {
-            dead.push(id);
+    let mut lagging = Vec::new();
+    {
+        let g = clients.lock().await;
+        for (id, tx) in g.iter() {
+            match tx.try_send(Arc::clone(&bytes)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    debug!(client_id = *id, "client queue full, snapshot deferred");
+                    lagging.push(*id);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => dead.push(*id),
+            }
         }
     }
+    *retry = lagging;
 
     if !dead.is_empty() {
         let mut g = clients.lock().await;
@@ -4490,8 +4552,15 @@ async fn fetch_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{forward_candidates, playlist_queue, shuffled_indices};
+    use super::{
+        broadcast_snapshot, forward_candidates, playlist_queue, shuffled_indices, ClientWriters,
+    };
+    use crate::protocol::{DaemonSnapshot, ServerMessage};
     use deezer_core::api::models::TrackData;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     fn track(id: &str) -> TrackData {
         serde_json::from_value(serde_json::json!({
@@ -4606,5 +4675,159 @@ mod tests {
     #[test]
     fn an_empty_queue_yields_an_empty_cycle() {
         assert!(shuffled_indices(0, 0, 42).is_empty());
+    }
+
+    // ── Snapshot broadcast ────────────────────────────────────────────────
+    //
+    // `broadcast_snapshot` never touches a socket: it only `try_send`s into
+    // the queue each client's writer task drains, so it can be tested with a
+    // plain channel standing in for a client.
+
+    /// Register a stand-in client and hand back the queue its writer would drain.
+    async fn add_client(
+        clients: &ClientWriters,
+        id: u64,
+        cap: usize,
+    ) -> mpsc::Receiver<Arc<Vec<u8>>> {
+        let (tx, rx) = mpsc::channel(cap);
+        clients.lock().await.insert(id, tx);
+        rx
+    }
+
+    fn empty_clients() -> ClientWriters {
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// Pop the next queued message and assert it is one well-formed JSON line.
+    fn take_message(rx: &mut mpsc::Receiver<Arc<Vec<u8>>>) -> DaemonSnapshot {
+        let bytes = rx.try_recv().expect("a snapshot was expected here");
+        assert!(bytes.ends_with(b"\n"), "messages are line-delimited");
+        let msg: ServerMessage =
+            serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("valid JSON");
+        match msg {
+            ServerMessage::Snapshot(snap) => snap,
+            ServerMessage::Error(e) => panic!("unexpected error message: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_snapshot_is_not_broadcast_again() {
+        let clients = empty_clients();
+        let mut rx = add_client(&clients, 0, 4).await;
+        let mut last = None;
+        let mut retry = Vec::new();
+        let snap = DaemonSnapshot::default();
+
+        broadcast_snapshot(&clients, snap.clone(), &mut last, &mut retry, false).await;
+        assert_eq!(take_message(&mut rx).position_secs, 0);
+
+        // Same state, new tick: the daemon must send nothing at all. This is
+        // the whole point of the dirty check — the tick fires every 250 ms
+        // whether or not anything moved.
+        broadcast_snapshot(&clients, snap.clone(), &mut last, &mut retry, false).await;
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "identical state must not be re-sent"
+        );
+
+        // …but an explicit snapshot request is always answered.
+        broadcast_snapshot(&clients, snap, &mut last, &mut retry, true).await;
+        take_message(&mut rx);
+    }
+
+    #[tokio::test]
+    async fn a_changed_snapshot_reaches_every_client() {
+        let clients = empty_clients();
+        let mut first = add_client(&clients, 0, 4).await;
+        let mut second = add_client(&clients, 1, 4).await;
+        let mut last = None;
+        let mut retry = Vec::new();
+
+        broadcast_snapshot(
+            &clients,
+            DaemonSnapshot::default(),
+            &mut last,
+            &mut retry,
+            false,
+        )
+        .await;
+        take_message(&mut first);
+        take_message(&mut second);
+
+        let moved = DaemonSnapshot {
+            position_secs: 42,
+            ..DaemonSnapshot::default()
+        };
+        broadcast_snapshot(&clients, moved, &mut last, &mut retry, false).await;
+        assert_eq!(take_message(&mut first).position_secs, 42);
+        assert_eq!(take_message(&mut second).position_secs, 42);
+    }
+
+    #[tokio::test]
+    async fn a_full_client_queue_defers_the_snapshot_instead_of_dropping_it() {
+        let clients = empty_clients();
+        // Capacity 1: the stand-in client never reads, so it fills up at once.
+        let mut rx = add_client(&clients, 7, 1).await;
+        let mut last = None;
+        let mut retry = Vec::new();
+
+        // First snapshot sits unread in the queue.
+        broadcast_snapshot(
+            &clients,
+            DaemonSnapshot::default(),
+            &mut last,
+            &mut retry,
+            false,
+        )
+        .await;
+
+        // The state then changes while the queue is still full: the snapshot
+        // is deferred, not pushed onto a full queue, and the client is flagged.
+        let moved = DaemonSnapshot {
+            position_secs: 42,
+            ..DaemonSnapshot::default()
+        };
+        broadcast_snapshot(&clients, moved.clone(), &mut last, &mut retry, false).await;
+        assert_eq!(
+            retry,
+            vec![7],
+            "a client that refused a snapshot must be flagged for a re-send"
+        );
+
+        // Draining the backlog leaves the queue empty: only the first
+        // snapshot ever made it through, the deferred one did not.
+        assert_eq!(take_message(&mut rx).position_secs, 0);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // Because the client is flagged, the state is re-sent even though it
+        // did not change since — otherwise the dropped update would leave it
+        // a step behind for as long as the state stands still.
+        broadcast_snapshot(&clients, moved, &mut last, &mut retry, false).await;
+        assert_eq!(take_message(&mut rx).position_secs, 42);
+        assert!(retry.is_empty(), "the client is caught up");
+    }
+
+    #[tokio::test]
+    async fn a_client_whose_socket_closed_is_removed() {
+        let clients = empty_clients();
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx); // the writer task would fail on its first write
+        clients.lock().await.insert(3, tx);
+
+        let mut last = None;
+        let mut retry = Vec::new();
+        broadcast_snapshot(
+            &clients,
+            DaemonSnapshot::default(),
+            &mut last,
+            &mut retry,
+            false,
+        )
+        .await;
+
+        assert!(
+            clients.lock().await.is_empty(),
+            "dead clients are dropped from the map"
+        );
     }
 }

@@ -808,12 +808,10 @@ pub struct ViewState {
     pub repeat: RepeatMode,
     pub queue: Vec<TrackData>,
     pub queue_index: usize,
-    pub search_results: Vec<TrackData>,
     pub search_selected: usize,
     pub search_loading: bool,
     pub search_category: SearchCategory,
     pub search_display: Vec<DisplayItem>,
-    pub favorites: Vec<TrackData>,
     pub favorites_selected: usize,
     pub favorites_loading: bool,
     pub favorites_category: FavoritesCategory,
@@ -1017,12 +1015,10 @@ impl ViewState {
             repeat: snap.repeat,
             queue: snap.queue.clone(),
             queue_index: snap.queue_index,
-            search_results: snap.search_results.clone(),
             search_selected: snap.search_selected,
             search_loading: snap.search_loading,
             search_category: snap.search_category,
             search_display: snap.search_display.clone(),
-            favorites: snap.favorites.clone(),
             favorites_selected: snap.favorites_selected,
             favorites_loading: snap.favorites_loading,
             favorites_category: snap.favorites_category,
@@ -1400,12 +1396,10 @@ impl ViewState {
         self.repeat = snap.repeat;
         self.queue = snap.queue;
         self.queue_index = snap.queue_index;
-        self.search_results = snap.search_results;
         self.search_selected = snap.search_selected;
         self.search_loading = snap.search_loading;
         self.search_category = snap.search_category;
         self.search_display = snap.search_display;
-        self.favorites = snap.favorites;
         self.favorites_selected = snap.favorites_selected;
         self.favorites_loading = snap.favorites_loading;
         // Reset filter when category changes
@@ -3501,7 +3495,6 @@ impl Client {
         let is_fav = self.view.is_track_favorite(track_id);
         if is_fav {
             self.view.favorite_track_ids.retain(|id| id != track_id);
-            self.view.favorites.retain(|t| t.track_id != track_id);
             KeyAction::SendCommand(Command::RemoveFavorite {
                 track_id: track_id.to_string(),
             })

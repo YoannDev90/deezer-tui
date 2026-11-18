@@ -435,8 +435,11 @@ pub struct DaemonSnapshot {
     pub queue_index: usize,
 
     // Search
-    #[serde(default)]
-    pub search_results: Vec<TrackData>,
+    //
+    // No `search_results` here: `search_display` already carries every track
+    // (`DisplayItem.track` embeds the full `TrackData`), and playback resolves
+    // the daemon-side copy by index. Sending both duplicated the whole result
+    // list on the wire.
     #[serde(default)]
     pub search_selected: usize,
     #[serde(default)]
@@ -447,8 +450,11 @@ pub struct DaemonSnapshot {
     pub search_display: Vec<DisplayItem>,
 
     // Favorites
-    #[serde(default)]
-    pub favorites: Vec<TrackData>,
+    //
+    // Same story as search: `favorites_display` carries the tracks (when the
+    // category is a track list), so a separate `favorites: Vec<TrackData>` was
+    // the same list serialized twice. The daemon keeps its own copy for
+    // `PlayFromFavorites` / `ShuffleFavorites`.
     #[serde(default)]
     pub favorites_selected: usize,
     #[serde(default)]
@@ -591,12 +597,10 @@ impl Default for DaemonSnapshot {
             lyrics_loading: false,
             queue: Vec::new(),
             queue_index: 0,
-            search_results: Vec::new(),
             search_selected: 0,
             search_loading: false,
             search_category: SearchCategory::default(),
             search_display: Vec::new(),
-            favorites: Vec::new(),
             favorites_selected: 0,
             favorites_loading: false,
             favorites_category: FavoritesCategory::default(),
