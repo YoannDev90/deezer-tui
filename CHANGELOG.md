@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - Live lyrics (`m`): `t` switches to Deezer's translation when the track has one
 
 ### Changed
+- State updates now only carry the lists of the tab you're on, not every tab's at once
 - Far less idle CPU and traffic: the TUI stops receiving full state updates several times a second while nothing changes
 - The TUI no longer redraws 20 times a second when the screen stands still: frames are drawn only when something actually changes (playing animations are unaffected)
 - Playing a track no longer resends the whole TUI state several times a second: only the playback position travels, a few dozen bytes instead of ~110 KB

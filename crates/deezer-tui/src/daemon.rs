@@ -1414,7 +1414,7 @@ impl Daemon {
 
     fn snapshot(&self) -> DaemonSnapshot {
         let state = self.player_state.lock().unwrap();
-        DaemonSnapshot {
+        let mut snap = DaemonSnapshot {
             screen: self.screen,
             active_tab: self.active_tab,
             status: state.status,
@@ -1501,7 +1501,11 @@ impl Daemon {
             login_loading: self.login_loading,
             user_name: self.user_name.clone(),
             is_offline: self.is_offline,
-        }
+        };
+        // Ship only what the active tab renders; the lists come back in full
+        // on the snapshot following a tab switch.
+        snap.prune_inactive_tabs();
+        snap
     }
 
     // --- Async actions ---

@@ -410,6 +410,8 @@ pub struct MoodEntry {
 /// Complete state snapshot sent from daemon to client.
 /// All fields use `#[serde(default)]` for forward/backward compatibility
 /// when daemon and client are running different binary versions.
+/// Lists of tabs other than `active_tab` are emptied before it goes on the
+/// wire — see [`DaemonSnapshot::prune_inactive_tabs`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonSnapshot {
     #[serde(default)]
@@ -596,6 +598,58 @@ pub struct DaemonSnapshot {
     pub user_name: Option<String>,
     #[serde(default)]
     pub is_offline: bool,
+}
+
+impl DaemonSnapshot {
+    /// Drop the lists the active tab doesn't render, so a snapshot carries
+    /// one tab's data instead of every tab's at once (radios alone are ~300
+    /// entries, search results embed full tracks).
+    ///
+    /// This only shapes the wire: the daemon keeps its own copies for every
+    /// command, and the lists come back in full on the next snapshot after a
+    /// tab switch. Fields needed outside their tab are never touched —
+    /// `favorite_*_ids` (hearts), `offline_track_ids` (download badges) and
+    /// `playlists` (the picker popup opens from any tab) — and neither are
+    /// the selection/loading flags, so switching back restores the tab as it
+    /// was left.
+    pub fn prune_inactive_tabs(&mut self) {
+        if self.active_tab != ActiveTab::Search {
+            self.search_display.clear();
+        }
+        if self.active_tab != ActiveTab::Favorites {
+            self.favorites_display.clear();
+        }
+        match self.active_tab {
+            ActiveTab::Explore => {
+                // Only the sub-category on screen is rendered (ui/explore.rs
+                // matches on it); switching category reloads the other lists.
+                match self.explore_category {
+                    ExploreCategory::Moods => {
+                        self.radios.clear();
+                        self.genres.clear();
+                    }
+                    ExploreCategory::Categories => {
+                        self.radios.clear();
+                        self.moods.clear();
+                    }
+                    ExploreCategory::Radios => {
+                        self.moods.clear();
+                        self.genres.clear();
+                    }
+                }
+            }
+            _ => {
+                self.radios.clear();
+                self.moods.clear();
+                self.genres.clear();
+            }
+        }
+        if self.active_tab != ActiveTab::Downloads {
+            self.offline_tracks.clear();
+            self.offline_albums.clear();
+            self.offline_playlists.clear();
+        }
+    }
 }
 
 fn default_volume() -> f32 {
@@ -823,5 +877,114 @@ mod tests {
         let once = serde_json::to_value(tick).expect("serialize");
         let back: PlaybackTick = serde_json::from_value(once.clone()).expect("reparse");
         assert_eq!(serde_json::to_value(back).expect("reserialize"), once);
+    }
+
+    /// A snapshot populated on every tab, to prune from.
+    fn full_snapshot() -> DaemonSnapshot {
+        let mut snap: DaemonSnapshot = serde_json::from_value(json!({})).expect("empty snapshot");
+        let item = |name: &str| DisplayItem {
+            col1: name.into(),
+            col2: String::new(),
+            col3: String::new(),
+            col4: String::new(),
+            track: None,
+            album_id: None,
+            playlist_id: None,
+            artist_id: None,
+            show_id: None,
+            kind: None,
+        };
+        snap.search_display = vec![item("search")];
+        snap.favorites_display = vec![item("favorite")];
+        snap.radios = vec![RadioItem {
+            id: 1,
+            title: "radio".into(),
+        }];
+        snap.moods = vec![MoodEntry::default()];
+        snap.genres = vec![GenreItem {
+            id: 1,
+            name: "genre".into(),
+        }];
+        let track: TrackData = serde_json::from_value(json!({
+            "SNG_ID": "1", "SNG_TITLE": "t", "ART_NAME": "a", "DURATION": "10"
+        }))
+        .expect("track");
+        snap.offline_tracks = vec![OfflineTrack {
+            track,
+            quality: AudioQuality::default(),
+        }];
+        snap.playlists = vec![PlaylistData {
+            playlist_id: "1".into(),
+            title: "playlist".into(),
+            nb_songs: 1,
+            author: String::new(),
+            collaborative: false,
+        }];
+        snap.favorite_track_ids = vec!["10".into()];
+        snap.offline_track_ids = vec!["20".into()];
+        snap.search_selected = 3;
+        snap
+    }
+
+    /// Only the active tab's lists ride the wire; the fields other tabs
+    /// depend on (hearts, download badges, the picker) and the selection
+    /// flags always do.
+    #[test]
+    fn prune_inactive_tabs_ships_only_the_active_tab() {
+        let mut snap = full_snapshot();
+        snap.active_tab = ActiveTab::Search;
+        snap.prune_inactive_tabs();
+        assert_eq!(snap.search_display.len(), 1);
+        assert!(snap.favorites_display.is_empty());
+        assert!(snap.radios.is_empty() && snap.moods.is_empty() && snap.genres.is_empty());
+        assert!(snap.offline_tracks.is_empty());
+        assert_eq!(snap.search_selected, 3, "selection flags ride along");
+        assert_eq!(
+            snap.favorite_track_ids,
+            vec!["10".to_string()],
+            "hearts cross tabs"
+        );
+        assert_eq!(
+            snap.offline_track_ids,
+            vec!["20".to_string()],
+            "badges cross tabs"
+        );
+        assert_eq!(snap.playlists.len(), 1, "the picker opens from any tab");
+
+        let mut snap = full_snapshot();
+        snap.active_tab = ActiveTab::Favorites;
+        snap.prune_inactive_tabs();
+        assert_eq!(snap.favorites_display.len(), 1);
+        assert!(snap.search_display.is_empty());
+
+        // Explore ships only the sub-category on screen.
+        for (category, kept) in [
+            (ExploreCategory::Moods, 1),
+            (ExploreCategory::Categories, 1),
+            (ExploreCategory::Radios, 1),
+        ] {
+            let mut snap = full_snapshot();
+            snap.active_tab = ActiveTab::Explore;
+            snap.explore_category = category;
+            snap.prune_inactive_tabs();
+            let (radios, moods, genres) = (snap.radios.len(), snap.moods.len(), snap.genres.len());
+            let shipped = radios + moods + genres;
+            assert_eq!(shipped, kept, "{category:?} ships exactly one list");
+            assert_eq!(
+                match category {
+                    ExploreCategory::Moods => moods,
+                    ExploreCategory::Categories => genres,
+                    ExploreCategory::Radios => radios,
+                },
+                1,
+                "{category:?} keeps its own list"
+            );
+        }
+
+        let mut snap = full_snapshot();
+        snap.active_tab = ActiveTab::Downloads;
+        snap.prune_inactive_tabs();
+        assert_eq!(snap.offline_tracks.len(), 1);
+        assert!(snap.radios.is_empty() && snap.search_display.is_empty());
     }
 }
