@@ -537,7 +537,7 @@ impl Keymap {
 
         // Ensure completeness over all actions (in case any was missed above).
         for action in Action::all() {
-            b.entry(*action).or_insert_with(Vec::new);
+            b.entry(*action).or_default();
         }
 
         Self { bindings: b }
@@ -645,9 +645,8 @@ impl Keymap {
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         fs::write(&tmp, format!("{content}\n"))
             .and_then(|()| fs::rename(&tmp, path))
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = fs::remove_file(&tmp);
-                e
             })
     }
 
