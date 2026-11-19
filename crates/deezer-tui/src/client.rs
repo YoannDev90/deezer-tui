@@ -33,6 +33,7 @@ use deezer_core::player::eq::{EqPreset, EqSettings, EQ_BAND_COUNT};
 use deezer_core::player::state::{PlaybackStatus, RepeatMode};
 
 use crate::i18n::{self, t, Locale};
+use crate::keymap::{Action, Keymap};
 use crate::release_notes::{self, NoteLine};
 use deezer_core::offline::OfflineTrack;
 
@@ -829,6 +830,8 @@ pub struct ViewState {
     pub favorite_artist_ids: Vec<String>,
     pub favorite_album_ids: Vec<String>,
     pub vim_keys: bool,
+    /// User-editable keybindings loaded from `keybindings.json` (full, no delta).
+    pub keymap: Keymap,
     pub offline_category: OfflineCategory,
     pub offline_tracks: Vec<OfflineTrack>,
     pub offline_albums: Vec<AlbumDetail>,
@@ -1005,6 +1008,10 @@ impl ViewState {
     }
 
     fn from_snapshot(snap: &DaemonSnapshot) -> Self {
+        #[cfg(test)]
+        let vim_keys = false;
+        #[cfg(not(test))]
+        let vim_keys = Config::load().vim_keys;
         Self {
             screen: snap.screen,
             active_tab: snap.active_tab,
@@ -1095,7 +1102,8 @@ impl ViewState {
             login_loading: snap.login_loading,
             user_name: snap.user_name.clone(),
             is_offline: snap.is_offline,
-            vim_keys: Config::load().vim_keys,
+            vim_keys,
+            keymap: Keymap::load(vim_keys),
 
             offline_filter_input: String::new(),
             offline_filter_typing: false,
@@ -1128,36 +1136,52 @@ impl ViewState {
         }
     }
 
-    /// Whether a key represents navigating up (Up arrow, or 'k' if vim_keys is enabled).
-    pub fn is_nav_up(&self, code: KeyCode) -> bool {
-        Self::nav_up(code, self.vim_keys)
+    /// Check if a key event matches a configured action in the keymap.
+    #[allow(dead_code)]
+    pub fn is_action(&self, action: Action, key: KeyEvent) -> bool {
+        self.keymap.matches(action, key)
     }
 
+    /// Whether a key represents navigating up (configured via keymap, with vim_keys fallback).
+    pub fn is_nav_up(&self, code: KeyCode) -> bool {
+        self.keymap
+            .matches(Action::NavUp, KeyEvent::new(code, KeyModifiers::NONE))
+            || (self.vim_keys && code == KeyCode::Char('k'))
+    }
+
+    /// Static helper for contexts that only know the effective nav bindings.
+    /// Kept for compatibility with call sites that do not have a `ViewState`.
     pub fn nav_up(code: KeyCode, vim_keys: bool) -> bool {
         code == KeyCode::Up || (vim_keys && code == KeyCode::Char('k'))
     }
 
-    /// Whether a key represents navigating down (Down arrow, or 'j' if vim_keys is enabled).
+    /// Whether a key represents navigating down (configured via keymap, with vim_keys fallback).
     pub fn is_nav_down(&self, code: KeyCode) -> bool {
-        Self::nav_down(code, self.vim_keys)
+        self.keymap
+            .matches(Action::NavDown, KeyEvent::new(code, KeyModifiers::NONE))
+            || (self.vim_keys && code == KeyCode::Char('j'))
     }
 
     pub fn nav_down(code: KeyCode, vim_keys: bool) -> bool {
         code == KeyCode::Down || (vim_keys && code == KeyCode::Char('j'))
     }
 
-    /// Whether a key represents navigating left (Left arrow, or 'h' if vim_keys is enabled).
+    /// Whether a key represents navigating left (configured via keymap, with vim_keys fallback).
     pub fn is_nav_left(&self, code: KeyCode) -> bool {
-        Self::nav_left(code, self.vim_keys)
+        self.keymap
+            .matches(Action::NavLeft, KeyEvent::new(code, KeyModifiers::NONE))
+            || (self.vim_keys && code == KeyCode::Char('h'))
     }
 
     pub fn nav_left(code: KeyCode, vim_keys: bool) -> bool {
         code == KeyCode::Left || (vim_keys && code == KeyCode::Char('h'))
     }
 
-    /// Whether a key represents navigating right (Right arrow, or 'l' if vim_keys is enabled).
+    /// Whether a key represents navigating right (configured via keymap, with vim_keys fallback).
     pub fn is_nav_right(&self, code: KeyCode) -> bool {
-        Self::nav_right(code, self.vim_keys)
+        self.keymap
+            .matches(Action::NavRight, KeyEvent::new(code, KeyModifiers::NONE))
+            || (self.vim_keys && code == KeyCode::Char('l'))
     }
 
     pub fn nav_right(code: KeyCode, vim_keys: bool) -> bool {
@@ -2533,11 +2557,6 @@ impl Client {
     fn handle_key(&mut self, key: KeyEvent) -> KeyAction {
         debug!(?key, "client key event");
 
-        // Ctrl+C always detaches (daemon keeps playing)
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return KeyAction::Detach;
-        }
-
         let popup_typing = self
             .view
             .popup
@@ -2556,12 +2575,15 @@ impl Client {
                 )
             });
 
-        // ? : toggle help overlay (not during text input)
-        if key.code == KeyCode::Char('?')
-            && self.view.screen == Screen::Main
-            && !self.view.is_text_input_active()
-            && !popup_typing
-        {
+        // Detach keeps the daemon playing. Checked early so it works from most contexts.
+        if self.view.keymap.matches(Action::AppDetach, key) {
+            return KeyAction::Detach;
+        }
+
+        let can_global_toggle =
+            self.view.screen == Screen::Main && !self.view.is_text_input_active() && !popup_typing;
+
+        if can_global_toggle && self.view.keymap.matches(Action::HelpToggle, key) {
             if matches!(self.view.overlay, Some(Overlay::Help { .. })) {
                 self.view.pop_overlay();
             } else {
@@ -2570,26 +2592,19 @@ impl Client {
             return KeyAction::Continue;
         }
 
-        // Home / End / PageUp / PageDown: jump within the focused list. With
-        // no list on screen the key falls through, for modals that scroll.
-        if matches!(
-            key.code,
-            KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown
-        ) && self.view.screen == Screen::Main
-            && !self.view.is_text_input_active()
-            && !popup_typing
+        // Jump within the focused list (Home/End/PageUp/PageDown).
+        if can_global_toggle
+            && (self.view.keymap.matches(Action::NavHome, key)
+                || self.view.keymap.matches(Action::NavEnd, key)
+                || self.view.keymap.matches(Action::NavPageUp, key)
+                || self.view.keymap.matches(Action::NavPageDown, key))
         {
             if let Some(action) = self.jump_in_list(key.code) {
                 return action;
             }
         }
 
-        // e : toggle equalizer (not during text input), from any page
-        if key.code == KeyCode::Char('e')
-            && self.view.screen == Screen::Main
-            && !self.view.is_text_input_active()
-            && !popup_typing
-        {
+        if can_global_toggle && self.view.keymap.matches(Action::EqualizerToggle, key) {
             if matches!(self.view.overlay, Some(Overlay::Equalizer { .. })) {
                 self.view.pop_overlay();
             } else {
@@ -2598,12 +2613,7 @@ impl Client {
             return KeyAction::Continue;
         }
 
-        // i : toggle info modal (not during text input)
-        if key.code == KeyCode::Char('i')
-            && self.view.screen == Screen::Main
-            && !self.view.is_text_input_active()
-            && !popup_typing
-        {
+        if can_global_toggle && self.view.keymap.matches(Action::InfoToggle, key) {
             if matches!(self.view.overlay, Some(Overlay::Info { .. })) {
                 self.view.pop_overlay();
             } else {
@@ -2612,8 +2622,7 @@ impl Client {
             return KeyAction::Continue;
         }
 
-        // Ctrl+O : toggle settings overlay
-        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.view.keymap.matches(Action::SettingsToggle, key) {
             if matches!(self.view.overlay, Some(Overlay::Settings { .. })) {
                 self.view.pop_overlay();
             } else {
@@ -2622,38 +2631,31 @@ impl Client {
             return KeyAction::Continue;
         }
 
-        // Ctrl+F: enter search/filter mode (same as /)
-        if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.view.screen == Screen::Main {
-                self.view.focus_filter_input(true);
-            }
+        if self.view.keymap.matches(Action::SearchFocus, key)
+            && self.view.screen == Screen::Main
+            && !self.view.is_text_input_active()
+            && !popup_typing
+        {
+            self.view.focus_filter_input(true);
             return KeyAction::Continue;
         }
 
-        // Ctrl+L: toggle favorite / like for focused track or playing track
-        if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Global "like" shortcut (e.g. Ctrl+L). Plain l/L are handled contextually
+        // elsewhere so they can coexist with vim navigation.
+        if self.view.keymap.matches(Action::LikeToggle, key)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
             if self.view.screen == Screen::Main {
                 return self.toggle_like_focused_or_playing();
             }
             return KeyAction::Continue;
         }
 
-        // Ctrl+Right: seek forward 10s
-        if key.code == KeyCode::Right && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.view.keymap.matches(Action::PlaybackSeekForward, key) {
             return KeyAction::SendCommand(Command::SeekForward { secs: 10 });
         }
-
-        // Ctrl+Left: seek backward 10s
-        if key.code == KeyCode::Left && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.view.keymap.matches(Action::PlaybackSeekBackward, key) {
             return KeyAction::SendCommand(Command::SeekBackward { secs: 10 });
-        }
-
-        // Ctrl+Z: detach (daemon keeps playing)
-        #[cfg(unix)]
-        if matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            return KeyAction::Detach;
         }
 
         match self.view.screen {
@@ -2668,63 +2670,73 @@ impl Client {
         }
 
         match self.view.login_mode {
-            LoginMode::Button => match key.code {
-                KeyCode::Enter => KeyAction::WebLogin,
-                KeyCode::Char('w') => {
+            LoginMode::Button => {
+                if self.view.keymap.matches(Action::LoginWeb, key)
+                    || self.view.keymap.matches(Action::Select, key)
+                {
+                    return KeyAction::WebLogin;
+                }
+                if self.view.keymap.matches(Action::LoginArlMode, key) {
                     self.view.login_mode = LoginMode::ArlInput;
                     self.view.login_input.clear();
                     self.view.login_cursor = 0;
-                    KeyAction::Continue
+                    return KeyAction::Continue;
                 }
-                KeyCode::Esc => KeyAction::Quit,
-                _ => KeyAction::Continue,
-            },
-            LoginMode::ArlInput => match key.code {
-                KeyCode::Esc => {
+                if self.view.keymap.matches(Action::Back, key)
+                    || self.view.keymap.matches(Action::AppQuit, key)
+                {
+                    return KeyAction::Quit;
+                }
+                KeyAction::Continue
+            }
+            LoginMode::ArlInput => {
+                if self.view.keymap.matches(Action::Back, key) {
                     self.view.login_mode = LoginMode::Button;
                     self.view.login_input.clear();
                     self.view.login_cursor = 0;
-                    KeyAction::Continue
+                    return KeyAction::Continue;
                 }
-                KeyCode::Enter => {
-                    if !self.view.login_input.is_empty() {
-                        let arl = self.view.login_input.clone();
-                        self.view.login_loading = true;
-                        KeyAction::SendCommand(Command::Login { arl })
-                    } else {
+                match key.code {
+                    KeyCode::Enter => {
+                        if !self.view.login_input.is_empty() {
+                            let arl = self.view.login_input.clone();
+                            self.view.login_loading = true;
+                            KeyAction::SendCommand(Command::Login { arl })
+                        } else {
+                            KeyAction::Continue
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        self.view.login_input.insert(self.view.login_cursor, c);
+                        self.view.login_cursor += 1;
                         KeyAction::Continue
                     }
-                }
-                KeyCode::Char(c) => {
-                    self.view.login_input.insert(self.view.login_cursor, c);
-                    self.view.login_cursor += 1;
-                    KeyAction::Continue
-                }
-                KeyCode::Backspace => {
-                    if self.view.login_cursor > 0 {
-                        self.view.login_cursor -= 1;
-                        self.view.login_input.remove(self.view.login_cursor);
+                    KeyCode::Backspace => {
+                        if self.view.login_cursor > 0 {
+                            self.view.login_cursor -= 1;
+                            self.view.login_input.remove(self.view.login_cursor);
+                        }
+                        KeyAction::Continue
                     }
-                    KeyAction::Continue
-                }
-                KeyCode::Left => {
-                    self.view.login_cursor = self.view.login_cursor.saturating_sub(1);
-                    KeyAction::Continue
-                }
-                KeyCode::Right => {
-                    if self.view.login_cursor < self.view.login_input.len() {
-                        self.view.login_cursor += 1;
+                    KeyCode::Left => {
+                        self.view.login_cursor = self.view.login_cursor.saturating_sub(1);
+                        KeyAction::Continue
                     }
-                    KeyAction::Continue
+                    KeyCode::Right => {
+                        if self.view.login_cursor < self.view.login_input.len() {
+                            self.view.login_cursor += 1;
+                        }
+                        KeyAction::Continue
+                    }
+                    _ => KeyAction::Continue,
                 }
-                _ => KeyAction::Continue,
-            },
+            }
         }
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) -> KeyAction {
-        // Ctrl+Q: quit from anywhere (send Shutdown to daemon)
-        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Quit from anywhere (send Shutdown to daemon)
+        if self.view.keymap.matches(Action::AppQuit, key) {
             return KeyAction::Quit;
         }
 
@@ -2733,8 +2745,8 @@ impl Client {
             return self.handle_popup_key(key);
         }
 
-        // Ctrl+Space: open manage popup for currently playing track (global)
-        if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Menu for currently playing track
+        if self.view.keymap.matches(Action::PlayingContextMenu, key) {
             if let Some(ref track) = self.view.current_track {
                 let is_fav = self.view.is_track_favorite(&track.track_id);
                 self.view.popup = Some(PopupMenu::manage_only(track.clone(), is_fav));
@@ -2873,266 +2885,257 @@ impl Client {
             }
         }
 
-        // Normal mode
-        match key.code {
-            // Tab navigation (disabled in offline mode — only Offline tab available)
-            KeyCode::Tab | KeyCode::BackTab if self.view.is_offline => KeyAction::Continue,
-            KeyCode::Tab => KeyAction::SendCommand(Command::NextTab),
-            KeyCode::BackTab => KeyAction::SendCommand(Command::PrevTab),
-
-            // Enter search/filter typing mode
-            KeyCode::Char('/') => {
-                self.view.focus_filter_input(true);
-                KeyAction::Continue
+        // Normal mode (actions driven by keymap; text-input modes returned earlier)
+        if self.view.keymap.matches(Action::NextTab, key) && !self.view.is_offline {
+            return KeyAction::SendCommand(Command::NextTab);
+        }
+        if self.view.keymap.matches(Action::PrevTab, key) && !self.view.is_offline {
+            return KeyAction::SendCommand(Command::PrevTab);
+        }
+        if self.view.keymap.matches(Action::SearchFocus, key)
+            || self.view.keymap.matches(Action::FilterStart, key)
+        {
+            self.view.focus_filter_input(true);
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::ContextMenu, key) {
+            self.open_item_popup();
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::OpenAlbum, key) {
+            return self.open_album_detail();
+        }
+        if self.view.keymap.matches(Action::OpenArtist, key) {
+            return self.open_artist_detail();
+        }
+        if self.view.keymap.matches(Action::WaitingList, key) {
+            self.view.push_overlay(Overlay::WaitingList { selected: 0 });
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::ShuffleFavorites, key) {
+            if self.view.active_tab == ActiveTab::Favorites {
+                return KeyAction::SendCommand(Command::ShuffleFavorites);
             }
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::FlowStart, key) {
+            return KeyAction::SendCommand(Command::StartFlow);
+        }
+        if self.view.keymap.matches(Action::LyricsToggle, key) {
+            return self.toggle_lyrics_overlay();
+        }
+        // Like: keymap-driven (vim mode removes plain 'l' from this action).
+        if self.view.keymap.matches(Action::LikeToggle, key)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return self.toggle_like_focused_or_playing();
+        }
+        if self.view.keymap.matches(Action::PlaybackToggle, key) {
+            return KeyAction::SendCommand(Command::TogglePause);
+        }
+        if self.view.keymap.matches(Action::PlaybackNext, key) {
+            return KeyAction::SendCommand(Command::NextTrack);
+        }
+        if self.view.keymap.matches(Action::PlaybackPrev, key) {
+            return KeyAction::SendCommand(Command::PrevTrack);
+        }
+        if self.view.keymap.matches(Action::ShuffleToggle, key) {
+            return KeyAction::SendCommand(Command::ToggleShuffle);
+        }
+        if self.view.keymap.matches(Action::RepeatCycle, key) {
+            return KeyAction::SendCommand(Command::CycleRepeat);
+        }
+        if self.view.keymap.matches(Action::VolumeUp, key) {
+            let new_vol = (self.view.volume + 0.05).min(1.0);
+            return KeyAction::SendCommand(Command::SetVolume { volume: new_vol });
+        }
+        if self.view.keymap.matches(Action::VolumeDown, key) {
+            let new_vol = (self.view.volume - 0.05).max(0.0);
+            return KeyAction::SendCommand(Command::SetVolume { volume: new_vol });
+        }
 
-            // Open track context menu
-            KeyCode::Char('x') => {
-                self.open_item_popup();
-                KeyAction::Continue
+        // Category/list navigation (uses nav bindings; vim-aware via keymap+view).
+        if self.view.is_nav_left(key.code) {
+            return KeyAction::SendCommand(Command::PrevCategory);
+        }
+        if self.view.is_nav_right(key.code) {
+            return KeyAction::SendCommand(Command::NextCategory);
+        }
+        if self.view.is_nav_up(key.code) {
+            if self.view.active_tab == ActiveTab::Explore {
+                match self.view.explore_category {
+                    ExploreCategory::Moods => {
+                        self.view.moods_selected = self.view.moods_selected.saturating_sub(1);
+                    }
+                    ExploreCategory::Categories => {
+                        self.view.genres_selected = self.view.genres_selected.saturating_sub(1);
+                    }
+                    ExploreCategory::Radios => {
+                        self.view.radios_selected = self.view.radios_selected.saturating_sub(1);
+                    }
+                }
+                return KeyAction::Continue;
             }
-
-            // Open album detail page
-            KeyCode::Char('a') => self.open_album_detail(),
-
-            // Open artist detail page
-            KeyCode::Char('t') => self.open_artist_detail(),
-
-            // Open waiting list
-            KeyCode::Char('w') => {
-                self.view.push_overlay(Overlay::WaitingList { selected: 0 });
-                KeyAction::Continue
+            if self.view.active_tab == ActiveTab::Downloads && self.view.offline_filter_active() {
+                self.view.offline_filter_selected =
+                    self.view.offline_filter_selected.saturating_sub(1);
+                return KeyAction::Continue;
             }
-
-            // Category navigation (h/l or left/right)
-            code if self.view.is_nav_left(code) => KeyAction::SendCommand(Command::PrevCategory),
-            code if self.view.is_nav_right(code) => KeyAction::SendCommand(Command::NextCategory),
-
-            // List navigation
-            code if self.view.is_nav_up(code) => {
-                if self.view.active_tab == ActiveTab::Explore {
-                    match self.view.explore_category {
-                        ExploreCategory::Moods => {
-                            self.view.moods_selected = self.view.moods_selected.saturating_sub(1);
-                        }
-                        ExploreCategory::Categories => {
-                            self.view.genres_selected = self.view.genres_selected.saturating_sub(1);
-                        }
-                        ExploreCategory::Radios => {
-                            self.view.radios_selected = self.view.radios_selected.saturating_sub(1);
+            if self.view.active_tab == ActiveTab::Favorites && self.view.favorites_filter_active() {
+                self.view.favorites_filter_selected =
+                    self.view.favorites_filter_selected.saturating_sub(1);
+                return KeyAction::Continue;
+            }
+            return KeyAction::SendCommand(Command::SelectUp);
+        }
+        if self.view.is_nav_down(key.code) {
+            if self.view.active_tab == ActiveTab::Explore {
+                match self.view.explore_category {
+                    ExploreCategory::Moods => {
+                        if !self.view.moods.is_empty() {
+                            self.view.moods_selected =
+                                (self.view.moods_selected + 1).min(self.view.moods.len() - 1);
                         }
                     }
-                    return KeyAction::Continue;
+                    ExploreCategory::Categories => {
+                        if !self.view.genres_filtered.is_empty() {
+                            self.view.genres_selected = (self.view.genres_selected + 1)
+                                .min(self.view.genres_filtered.len() - 1);
+                        }
+                    }
+                    ExploreCategory::Radios => {
+                        if !self.view.radios_filtered.is_empty() {
+                            self.view.radios_selected = (self.view.radios_selected + 1)
+                                .min(self.view.radios_filtered.len() - 1);
+                        }
+                    }
                 }
-                if self.view.active_tab == ActiveTab::Downloads && self.view.offline_filter_active()
-                {
+                return KeyAction::Continue;
+            }
+            if self.view.active_tab == ActiveTab::Downloads && self.view.offline_filter_active() {
+                let len = self.view.offline_list_len();
+                if len > 0 {
                     self.view.offline_filter_selected =
-                        self.view.offline_filter_selected.saturating_sub(1);
-                    return KeyAction::Continue;
+                        (self.view.offline_filter_selected + 1).min(len - 1);
                 }
-                if self.view.active_tab == ActiveTab::Favorites
-                    && self.view.favorites_filter_active()
-                {
-                    self.view.favorites_filter_selected =
-                        self.view.favorites_filter_selected.saturating_sub(1);
-                    return KeyAction::Continue;
-                }
-                KeyAction::SendCommand(Command::SelectUp)
+                return KeyAction::Continue;
             }
-            code if self.view.is_nav_down(code) => {
-                if self.view.active_tab == ActiveTab::Explore {
-                    match self.view.explore_category {
-                        ExploreCategory::Moods => {
-                            if !self.view.moods.is_empty() {
-                                self.view.moods_selected =
-                                    (self.view.moods_selected + 1).min(self.view.moods.len() - 1);
-                            }
-                        }
-                        ExploreCategory::Categories => {
-                            if !self.view.genres_filtered.is_empty() {
-                                self.view.genres_selected = (self.view.genres_selected + 1)
-                                    .min(self.view.genres_filtered.len() - 1);
-                            }
-                        }
-                        ExploreCategory::Radios => {
-                            if !self.view.radios_filtered.is_empty() {
-                                self.view.radios_selected = (self.view.radios_selected + 1)
-                                    .min(self.view.radios_filtered.len() - 1);
-                            }
-                        }
-                    }
-                    return KeyAction::Continue;
-                }
-                if self.view.active_tab == ActiveTab::Downloads && self.view.offline_filter_active()
-                {
-                    let len = self.view.offline_list_len();
-                    if len > 0 {
-                        self.view.offline_filter_selected =
-                            (self.view.offline_filter_selected + 1).min(len - 1);
-                    }
-                    return KeyAction::Continue;
-                }
-                if self.view.active_tab == ActiveTab::Favorites
-                    && self.view.favorites_filter_active()
-                {
-                    if !self.view.favorites_filtered.is_empty() {
-                        self.view.favorites_filter_selected = (self.view.favorites_filter_selected
-                            + 1)
+            if self.view.active_tab == ActiveTab::Favorites && self.view.favorites_filter_active() {
+                if !self.view.favorites_filtered.is_empty() {
+                    self.view.favorites_filter_selected = (self.view.favorites_filter_selected + 1)
                         .min(self.view.favorites_filtered.len() - 1);
-                    }
-                    return KeyAction::Continue;
                 }
-                KeyAction::SendCommand(Command::SelectDown)
+                return KeyAction::Continue;
             }
+            return KeyAction::SendCommand(Command::SelectDown);
+        }
 
-            // Play selected track or open album detail
-            KeyCode::Enter => {
-                // Check if the selected item is an album (has album_id but no track)
-                let item = match self.view.active_tab {
-                    ActiveTab::Search => self.view.search_display.get(self.view.search_selected),
-                    ActiveTab::Favorites => self.view.favorites_selected_item(),
-                    _ => None,
-                };
-                if let Some(item) = item {
-                    if item.track.is_none() {
-                        if let Some(artist_id) = item.artist_id.clone() {
-                            self.view.set_nav_overlay(Overlay::ArtistDetail);
-                            self.view.artist_detail_selected = 0;
-                            self.view.artist_detail_left_scroll = 0;
-                            self.view.artist_detail_left_focused = false;
-                            return KeyAction::SendCommand(Command::GetArtistDetail { artist_id });
-                        }
-                        if let Some(album_id) = item.album_id.clone() {
-                            self.view
-                                .set_nav_overlay(Overlay::AlbumDetail { from_artist: false });
-                            self.view.album_detail_selected = 0;
-                            self.view.album_detail_left_scroll = 0;
-                            self.view.album_detail_left_focused = false;
-                            return KeyAction::SendCommand(Command::GetAlbumDetail { album_id });
-                        }
-                        if let Some(playlist_id) = item.playlist_id.clone() {
-                            self.view.reset_playlist_detail_filter();
-                            self.view
-                                .set_nav_overlay(Overlay::PlaylistDetail { selected: 0 });
-                            return KeyAction::SendCommand(Command::GetPlaylistDetail {
-                                playlist_id,
-                            });
-                        }
-                        if let Some(show_id) = item.show_id.clone() {
-                            // Shows reuse the playlist detail; drop its filter/sort.
-                            self.view.reset_playlist_detail_filter();
-                            self.view
-                                .set_nav_overlay(Overlay::ShowDetail { selected: 0 });
-                            return KeyAction::SendCommand(Command::GetShowDetail { show_id });
-                        }
+        if self.view.keymap.matches(Action::Select, key) {
+            // Check if the selected item is an album/artist/playlist/show (no track)
+            let item = match self.view.active_tab {
+                ActiveTab::Search => self.view.search_display.get(self.view.search_selected),
+                ActiveTab::Favorites => self.view.favorites_selected_item(),
+                _ => None,
+            };
+            if let Some(item) = item {
+                if item.track.is_none() {
+                    if let Some(artist_id) = item.artist_id.clone() {
+                        self.view.set_nav_overlay(Overlay::ArtistDetail);
+                        self.view.artist_detail_selected = 0;
+                        self.view.artist_detail_left_scroll = 0;
+                        self.view.artist_detail_left_focused = false;
+                        return KeyAction::SendCommand(Command::GetArtistDetail { artist_id });
+                    }
+                    if let Some(album_id) = item.album_id.clone() {
+                        self.view
+                            .set_nav_overlay(Overlay::AlbumDetail { from_artist: false });
+                        self.view.album_detail_selected = 0;
+                        self.view.album_detail_left_scroll = 0;
+                        self.view.album_detail_left_focused = false;
+                        return KeyAction::SendCommand(Command::GetAlbumDetail { album_id });
+                    }
+                    if let Some(playlist_id) = item.playlist_id.clone() {
+                        self.view.reset_playlist_detail_filter();
+                        self.view
+                            .set_nav_overlay(Overlay::PlaylistDetail { selected: 0 });
+                        return KeyAction::SendCommand(Command::GetPlaylistDetail { playlist_id });
+                    }
+                    if let Some(show_id) = item.show_id.clone() {
+                        self.view.reset_playlist_detail_filter();
+                        self.view
+                            .set_nav_overlay(Overlay::ShowDetail { selected: 0 });
+                        return KeyAction::SendCommand(Command::GetShowDetail { show_id });
                     }
                 }
-                match self.view.active_tab {
-                    ActiveTab::Search => KeyAction::SendCommand(Command::PlayFromSearch {
-                        index: self.view.search_selected,
-                    }),
-                    ActiveTab::Favorites => KeyAction::SendCommand(Command::PlayFromFavorites {
-                        index: self.view.favorites_selected_original_index(),
-                    }),
-                    ActiveTab::Explore => match self.view.explore_category {
-                        ExploreCategory::Moods => {
-                            if self.view.moods.is_empty() {
-                                KeyAction::Continue
-                            } else {
-                                KeyAction::SendCommand(Command::PlayFromMood {
-                                    index: self.view.moods_selected,
-                                })
-                            }
-                        }
-                        ExploreCategory::Radios => {
-                            // Find the original index of the filtered radio in the full list
-                            if let Some(filtered_radio) =
-                                self.view.radios_filtered.get(self.view.radios_selected)
-                            {
-                                let original_idx = self
-                                    .view
-                                    .radios
-                                    .iter()
-                                    .position(|r| r.id == filtered_radio.id)
-                                    .unwrap_or(0);
-                                KeyAction::SendCommand(Command::PlayFromRadio {
-                                    index: original_idx,
-                                })
-                            } else {
-                                KeyAction::Continue
-                            }
-                        }
-                        ExploreCategory::Categories => {
-                            if let Some(genre) =
-                                self.view.genres_filtered.get(self.view.genres_selected)
-                            {
-                                let genre_id = genre.id;
-                                let name = genre.name.clone();
-                                self.view.set_nav_overlay(Overlay::GenreDetail {
-                                    sub_tab: GenreDetailSubTab::default(),
-                                    selected: 0,
-                                });
-                                KeyAction::SendCommand(Command::GetGenreDetail { genre_id, name })
-                            } else {
-                                KeyAction::Continue
-                            }
-                        }
-                    },
-                    ActiveTab::Downloads => match self.view.offline_category {
-                        OfflineCategory::Tracks => {
-                            KeyAction::SendCommand(Command::PlayFromOffline {
-                                index: self.view.offline_selected_track_index(),
+            }
+            return match self.view.active_tab {
+                ActiveTab::Search => KeyAction::SendCommand(Command::PlayFromSearch {
+                    index: self.view.search_selected,
+                }),
+                ActiveTab::Favorites => KeyAction::SendCommand(Command::PlayFromFavorites {
+                    index: self.view.favorites_selected_original_index(),
+                }),
+                ActiveTab::Explore => match self.view.explore_category {
+                    ExploreCategory::Moods => {
+                        if self.view.moods.is_empty() {
+                            KeyAction::Continue
+                        } else {
+                            KeyAction::SendCommand(Command::PlayFromMood {
+                                index: self.view.moods_selected,
                             })
                         }
-                        OfflineCategory::Albums | OfflineCategory::Playlists => {
-                            self.open_offline_detail()
+                    }
+                    ExploreCategory::Radios => {
+                        if let Some(filtered_radio) =
+                            self.view.radios_filtered.get(self.view.radios_selected)
+                        {
+                            let original_idx = self
+                                .view
+                                .radios
+                                .iter()
+                                .position(|r| r.id == filtered_radio.id)
+                                .unwrap_or(0);
+                            KeyAction::SendCommand(Command::PlayFromRadio {
+                                index: original_idx,
+                            })
+                        } else {
+                            KeyAction::Continue
                         }
-                    },
-                }
-            }
-
-            // Shuffle favorites
-            KeyCode::Char('g') => {
-                if self.view.active_tab == ActiveTab::Favorites {
-                    return KeyAction::SendCommand(Command::ShuffleFavorites);
-                }
-                KeyAction::Continue
-            }
-
-            // Deezer Flow
-            KeyCode::Char('f') => KeyAction::SendCommand(Command::StartFlow),
-
-            // Live lyrics
-            KeyCode::Char('m') => self.toggle_lyrics_overlay(),
-
-            // Toggle favorite / like for focused track or playing track
-            KeyCode::Char('L') | KeyCode::Char('l') => self.toggle_like_focused_or_playing(),
-
-            // Player controls
-            KeyCode::Char(' ') => KeyAction::SendCommand(Command::TogglePause),
-            KeyCode::Char('n') => KeyAction::SendCommand(Command::NextTrack),
-            KeyCode::Char('b') => KeyAction::SendCommand(Command::PrevTrack),
-            KeyCode::Char('s') => KeyAction::SendCommand(Command::ToggleShuffle),
-            KeyCode::Char('r') => KeyAction::SendCommand(Command::CycleRepeat),
-
-            // Volume
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                let new_vol = (self.view.volume + 0.05).min(1.0);
-                KeyAction::SendCommand(Command::SetVolume { volume: new_vol })
-            }
-            KeyCode::Char('-') => {
-                let new_vol = (self.view.volume - 0.05).max(0.0);
-                KeyAction::SendCommand(Command::SetVolume { volume: new_vol })
-            }
-
-            // Escape in normal mode: open settings
-            KeyCode::Esc => {
-                self.view.overlay = Some(Overlay::Settings { selected: 0 });
-                KeyAction::Continue
-            }
-
-            _ => KeyAction::Continue,
+                    }
+                    ExploreCategory::Categories => {
+                        if let Some(genre) =
+                            self.view.genres_filtered.get(self.view.genres_selected)
+                        {
+                            let genre_id = genre.id;
+                            let name = genre.name.clone();
+                            self.view.set_nav_overlay(Overlay::GenreDetail {
+                                sub_tab: GenreDetailSubTab::default(),
+                                selected: 0,
+                            });
+                            KeyAction::SendCommand(Command::GetGenreDetail { genre_id, name })
+                        } else {
+                            KeyAction::Continue
+                        }
+                    }
+                },
+                ActiveTab::Downloads => match self.view.offline_category {
+                    OfflineCategory::Tracks => KeyAction::SendCommand(Command::PlayFromOffline {
+                        index: self.view.offline_selected_track_index(),
+                    }),
+                    OfflineCategory::Albums | OfflineCategory::Playlists => {
+                        self.open_offline_detail()
+                    }
+                },
+            };
         }
+
+        // Back in normal main mode (no overlay/popup): open settings (matches prior Esc behavior).
+        if self.view.keymap.matches(Action::Back, key) {
+            self.view.overlay = Some(Overlay::Settings { selected: 0 });
+            return KeyAction::Continue;
+        }
+
+        KeyAction::Continue
     }
 
     /// Handle key events when an overlay is open.
@@ -3216,8 +3219,8 @@ impl Client {
                     // when a line has no translation).
                     KeyCode::Char('t') => *translated = !*translated,
                     // Playback keeps working from inside the overlay.
-                    code => {
-                        if let Some(action) = self.player_control_action(code) {
+                    _ => {
+                        if let Some(action) = self.player_control_action(key) {
                             return action;
                         }
                     }
@@ -3387,9 +3390,9 @@ impl Client {
                     }
                     // Volume, next/prev, shuffle, repeat, like keep working
                     // (Space stays the EQ on/off toggle above).
-                    code => {
+                    _ => {
                         return self
-                            .player_control_action(code)
+                            .player_control_action(key)
                             .unwrap_or(KeyAction::Continue)
                     }
                 }
@@ -3737,41 +3740,50 @@ impl Client {
     /// Player controls that stay available while a detail overlay is open.
     /// Returns `None` when the key is not a player control, so callers keep
     /// their own fallthrough behaviour.
-    ///
-    /// Shared by every detail overlay so the set can't drift between them —
-    /// `s` and `r` used to be missing from all of them.
-    fn player_control_action(&self, key: KeyCode) -> Option<KeyAction> {
-        let cmd = match key {
-            KeyCode::Char(' ') => Command::TogglePause,
-            KeyCode::Char('n') => Command::NextTrack,
-            KeyCode::Char('b') => Command::PrevTrack,
-            KeyCode::Char('s') => Command::ToggleShuffle,
-            KeyCode::Char('r') => Command::CycleRepeat,
-            KeyCode::Char('L') => {
-                if let Some(ref track) = self.view.current_track {
-                    let is_fav = self.view.is_track_favorite(&track.track_id);
-                    let cmd = if is_fav {
-                        Command::RemoveFavorite {
-                            track_id: track.track_id.clone(),
-                        }
-                    } else {
-                        Command::AddFavorite {
-                            track_id: track.track_id.clone(),
-                        }
-                    };
-                    return Some(KeyAction::SendCommand(cmd));
-                }
-                return None;
+    fn player_control_action(&self, key: KeyEvent) -> Option<KeyAction> {
+        let km = &self.view.keymap;
+        if km.matches(Action::PlaybackToggle, key) {
+            return Some(KeyAction::SendCommand(Command::TogglePause));
+        }
+        if km.matches(Action::PlaybackNext, key) {
+            return Some(KeyAction::SendCommand(Command::NextTrack));
+        }
+        if km.matches(Action::PlaybackPrev, key) {
+            return Some(KeyAction::SendCommand(Command::PrevTrack));
+        }
+        if km.matches(Action::ShuffleToggle, key) {
+            return Some(KeyAction::SendCommand(Command::ToggleShuffle));
+        }
+        if km.matches(Action::RepeatCycle, key) {
+            return Some(KeyAction::SendCommand(Command::CycleRepeat));
+        }
+        if km.matches(Action::LikeToggle, key) {
+            if let Some(ref track) = self.view.current_track {
+                let is_fav = self.view.is_track_favorite(&track.track_id);
+                let cmd = if is_fav {
+                    Command::RemoveFavorite {
+                        track_id: track.track_id.clone(),
+                    }
+                } else {
+                    Command::AddFavorite {
+                        track_id: track.track_id.clone(),
+                    }
+                };
+                return Some(KeyAction::SendCommand(cmd));
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => Command::SetVolume {
+            return None;
+        }
+        if km.matches(Action::VolumeUp, key) {
+            return Some(KeyAction::SendCommand(Command::SetVolume {
                 volume: (self.view.volume + 0.05).min(1.0),
-            },
-            KeyCode::Char('-') => Command::SetVolume {
+            }));
+        }
+        if km.matches(Action::VolumeDown, key) {
+            return Some(KeyAction::SendCommand(Command::SetVolume {
                 volume: (self.view.volume - 0.05).max(0.0),
-            },
-            _ => return None,
-        };
-        Some(KeyAction::SendCommand(cmd))
+            }));
+        }
+        None
     }
 
     /// Handle key events in the offline album/playlist detail modal.
@@ -3880,8 +3892,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }
@@ -3998,8 +4010,8 @@ impl Client {
 
     /// Handle key events in the album detail overlay.
     fn handle_album_detail_key(&mut self, key: KeyEvent) -> KeyAction {
-        // x: context menu for focused track
-        if key.code == KeyCode::Char('x') {
+        // Context menu for focused track
+        if self.view.keymap.matches(Action::ContextMenu, key) {
             if let Some(ref detail) = self.view.album_detail {
                 if let Some(track) = detail.tracks.get(self.view.album_detail_selected).cloned() {
                     let is_fav = self.view.is_track_favorite(&track.track_id);
@@ -4008,11 +4020,8 @@ impl Client {
             }
             return KeyAction::Continue;
         }
-        // f / L / l: toggle favorite for focused track
-        if key.code == KeyCode::Char('f')
-            || key.code == KeyCode::Char('L')
-            || (key.code == KeyCode::Char('l') && !self.view.vim_keys)
-        {
+        // Toggle favorite for focused track (keymap-driven; vim mode removes plain 'l')
+        if self.view.keymap.matches(Action::LikeToggle, key) {
             if let Some(ref detail) = self.view.album_detail {
                 if let Some(track) = detail.tracks.get(self.view.album_detail_selected) {
                     let track_id = track.track_id.clone();
@@ -4021,83 +4030,76 @@ impl Client {
             }
             return KeyAction::Continue;
         }
-        match key.code {
-            KeyCode::Esc => {
-                self.view.pop_overlay();
-                KeyAction::Continue
-            }
-            code if self.view.is_nav_left(code) => {
-                if self.view.album_detail_left_scrollable {
-                    self.view.album_detail_left_focused = true;
-                }
-                KeyAction::Continue
-            }
-            code if self.view.is_nav_right(code) => {
-                self.view.album_detail_left_focused = false;
-                KeyAction::Continue
-            }
-            code if self.view.is_nav_up(code) => {
-                if self.view.album_detail_left_focused {
-                    self.view.album_detail_left_scroll =
-                        self.view.album_detail_left_scroll.saturating_sub(1);
-                } else {
-                    self.view.album_detail_selected =
-                        self.view.album_detail_selected.saturating_sub(1);
-                }
-                KeyAction::Continue
-            }
-            code if self.view.is_nav_down(code) => {
-                if self.view.album_detail_left_focused {
-                    self.view.album_detail_left_scroll =
-                        self.view.album_detail_left_scroll.saturating_add(1);
-                } else if let Some(ref detail) = self.view.album_detail {
-                    if !detail.tracks.is_empty() {
-                        self.view.album_detail_selected =
-                            (self.view.album_detail_selected + 1).min(detail.tracks.len() - 1);
-                    }
-                }
-                KeyAction::Continue
-            }
-            KeyCode::Enter => {
-                if self.view.album_detail_left_focused {
-                    KeyAction::Continue
-                } else {
-                    let index = self.view.album_detail_selected;
-                    KeyAction::SendCommand(Command::PlayFromAlbum { index })
-                }
-            }
-            KeyCode::Char('t') => {
-                if let Some(ref detail) = self.view.album_detail {
-                    if let Some(track) = detail.tracks.get(self.view.album_detail_selected) {
-                        if let Some(ref artist_id) = track.artist_id {
-                            let artist_id = artist_id.clone();
-                            self.view.push_overlay(Overlay::ArtistDetail);
-                            self.view.artist_detail_selected = 0;
-                            return KeyAction::SendCommand(Command::GetArtistDetail { artist_id });
-                        }
-                    }
-                }
-                KeyAction::Continue
-            }
-            KeyCode::Char('d') => {
-                if let Some(ref detail) = self.view.album_detail {
-                    let album_id = detail.album_id.clone();
-                    KeyAction::SendCommand(Command::DownloadAlbumOffline { album_id })
-                } else {
-                    KeyAction::Continue
-                }
-            }
-            // Open waiting list on top of album detail
-            KeyCode::Char('w') => {
-                self.view.push_overlay(Overlay::WaitingList { selected: 0 });
-                KeyAction::Continue
-            }
-            // Player controls (play/pause, prev/next, shuffle, repeat,
-            // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
-                .unwrap_or(KeyAction::Continue),
+        if self.view.keymap.matches(Action::Back, key) {
+            self.view.pop_overlay();
+            return KeyAction::Continue;
         }
+        if self.view.is_nav_left(key.code) {
+            if self.view.album_detail_left_scrollable {
+                self.view.album_detail_left_focused = true;
+            }
+            return KeyAction::Continue;
+        }
+        if self.view.is_nav_right(key.code) {
+            self.view.album_detail_left_focused = false;
+            return KeyAction::Continue;
+        }
+        if self.view.is_nav_up(key.code) {
+            if self.view.album_detail_left_focused {
+                self.view.album_detail_left_scroll =
+                    self.view.album_detail_left_scroll.saturating_sub(1);
+            } else {
+                self.view.album_detail_selected = self.view.album_detail_selected.saturating_sub(1);
+            }
+            return KeyAction::Continue;
+        }
+        if self.view.is_nav_down(key.code) {
+            if self.view.album_detail_left_focused {
+                self.view.album_detail_left_scroll =
+                    self.view.album_detail_left_scroll.saturating_add(1);
+            } else if let Some(ref detail) = self.view.album_detail {
+                if !detail.tracks.is_empty() {
+                    self.view.album_detail_selected =
+                        (self.view.album_detail_selected + 1).min(detail.tracks.len() - 1);
+                }
+            }
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::Select, key) {
+            if self.view.album_detail_left_focused {
+                return KeyAction::Continue;
+            } else {
+                let index = self.view.album_detail_selected;
+                return KeyAction::SendCommand(Command::PlayFromAlbum { index });
+            }
+        }
+        if self.view.keymap.matches(Action::OpenArtist, key) {
+            if let Some(ref detail) = self.view.album_detail {
+                if let Some(track) = detail.tracks.get(self.view.album_detail_selected) {
+                    if let Some(ref artist_id) = track.artist_id {
+                        let artist_id = artist_id.clone();
+                        self.view.push_overlay(Overlay::ArtistDetail);
+                        self.view.artist_detail_selected = 0;
+                        return KeyAction::SendCommand(Command::GetArtistDetail { artist_id });
+                    }
+                }
+            }
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::DownloadOffline, key) {
+            if let Some(ref detail) = self.view.album_detail {
+                let album_id = detail.album_id.clone();
+                return KeyAction::SendCommand(Command::DownloadAlbumOffline { album_id });
+            }
+            return KeyAction::Continue;
+        }
+        if self.view.keymap.matches(Action::WaitingList, key) {
+            self.view.push_overlay(Overlay::WaitingList { selected: 0 });
+            return KeyAction::Continue;
+        }
+        // Player controls (play/pause, prev/next, shuffle, repeat, volume) stay active.
+        self.player_control_action(key)
+            .unwrap_or(KeyAction::Continue)
     }
 
     /// Handle key events in the artist detail overlay.
@@ -4247,8 +4249,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }
@@ -4445,8 +4447,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }
@@ -4500,8 +4502,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }
@@ -4636,8 +4638,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }
@@ -4712,8 +4714,8 @@ impl Client {
             }
             // Player controls (play/pause, prev/next, shuffle, repeat,
             // volume) stay active while this overlay is open.
-            other => self
-                .player_control_action(other)
+            _ => self
+                .player_control_action(key)
                 .unwrap_or(KeyAction::Continue),
         }
     }

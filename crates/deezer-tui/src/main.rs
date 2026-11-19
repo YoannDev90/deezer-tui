@@ -3,6 +3,7 @@ mod completions;
 mod daemon;
 mod favorites_cache;
 mod i18n;
+mod keymap;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod protocol;
