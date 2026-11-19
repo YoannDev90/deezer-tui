@@ -1,0 +1,32 @@
+# Hooks run on every `git commit` — installed by `mise setup-hooks`
+# (see mise.toml), which runs `pre-commit install`.
+#
+# The first run clones pre-commit-hooks once and caches it in
+# ~/.cache/pre-commit. Offline escape hatch: `git commit --no-verify`.
+
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # Staged-file formatting + secret scan. Single source of truth is the
+  # script itself: it formats and re-stages staged .rs files, and skips the
+  # gitleaks scan with a warning when gitleaks is not installed.
+  - repo: local
+    hooks:
+      - id: rustfmt-and-gitleaks
+        name: rustfmt + gitleaks (staged)
+        entry: .githooks/pre-commit
+        language: script
+        pass_filenames: false
+
+  # Repository hygiene: no trailing whitespace, newline at EOF, no merge
+  # conflict leftovers, valid TOML/YAML (Cargo manifests, workflows,
+  # CircleCI config), no private keys.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key

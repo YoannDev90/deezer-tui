@@ -1,7 +1,11 @@
 # Project tooling — `mise install`.
-# Versions are pinned, not "latest": everyone (and CI) must get the exact same
+# pre-commit is pinned: everyone gets the exact same version.
+#
+# Rust itself is NOT managed here: rustup owns the toolchains (MSRV 1.90.0,
+# same pin as .github/actions/setup-rust). A second toolchain from mise would
+# shadow the rustup shims and drift from CI.
+
 [tools]
-rust = "1.88.0"
 pre-commit = "4.6.2"
 
 [tasks.build]
@@ -9,24 +13,24 @@ description = "Build the binary in debug mode"
 run = "cargo build"
 
 [tasks.check]
-description = "Check the project (type + lint)"
+description = "Type-check the workspace"
 run = "cargo check"
 
 [tasks.test]
-description = "Run tests"
+description = "Run the test suite"
 run = "cargo test"
-
-[tasks.test-ui]
-description = "Run UI tests (if any)"
-run = "cargo test --test '*'"
-
-[tasks.clippy]
-description = "Run clippy linter"
-run = "cargo clippy"
 
 [tasks.fmt]
 description = "Format code with rustfmt"
 run = "cargo fmt"
+
+[tasks.clippy]
+description = "Run clippy with the CI gate"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.lint]
+description = "What CI enforces: formatting + clippy"
+run = "cargo fmt --check && cargo clippy --all-targets -- -D warnings"
 
 [tasks.run]
 description = "Run the TUI application"
@@ -34,25 +38,15 @@ run = "cargo run"
 
 [tasks.install]
 description = "Install the binary to PATH"
-run = "cargo install --path deezer-tui"
+run = "cargo install --path crates/deezer-tui"
 
 [tasks.clean]
 description = "Clean build artifacts"
 run = "cargo clean"
 
-[tasks.lint]
-description = "Run all linting checks"
-depends = ["check", "clippy"]
-run = ""
-
-[tasks.pretty-lint]
-description = "Run clippy only"
-depends = ["clippy"]
-run = ""
-
 [tasks.setup-hooks]
+description = "Install git hooks (pre-commit + commit-msg)"
 run = "pre-commit install && pre-commit install --hook-type commit-msg"
-description = "Install git hooks"
 
 [hooks]
 postinstall = "mise setup-hooks"
