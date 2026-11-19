@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Live lyrics (`m`): `t` switches to Deezer's translation when the track has one
+
 ### Changed
 - Far less idle CPU and traffic: the TUI stops receiving full state updates several times a second while nothing changes
 - The TUI no longer redraws 20 times a second when the screen stands still: frames are drawn only when something actually changes (playing animations are unaffected)
@@ -57,7 +60,7 @@ All notable changes to this project will be documented in this file.
 ## [1.20.0] - 2026-10-06
 
 ### Added
-- Info modal: 
+- Info modal:
     * direct link to the changelog
     * What's new section with changelog on the first launch of a new version
 - Check v1.19.0 interesting changes (released same day)
@@ -147,7 +150,7 @@ All notable changes to this project will be documented in this file.
 ## [1.15.0] - 2026-07-26
 
 ### Added
-- Mouse support: 
+- Mouse support:
     * click on menus, tabs, search bar...
     * scroll lists
     * can click `Flow` and `Shuffle play my favorite`
@@ -155,7 +158,7 @@ All notable changes to this project will be documented in this file.
     * right click to open track context menu
     * right click on bottom bar to open playing track's context menu
 - Download a whole playlist for offline mode (from context menu `x`) with % progression (#13)
-- New Playlists Offline tab 
+- New Playlists Offline tab
 - Offline filters for tracks, albums and playlists
 - Offline context menu : can now remove a track, album or playlist from offline storage
 - Search > Episodes, and Search > Podcasts is now working

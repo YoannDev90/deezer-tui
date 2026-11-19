@@ -579,8 +579,13 @@ pub enum Overlay {
     /// release notes, when it shows some.
     Info { scroll: usize },
     /// Live lyrics overlay. `scroll` is the first visible line (auto-follows
-    /// the current line unless the user scrolled away; `manual` tracks that).
-    Lyrics { scroll: usize, manual: bool },
+    /// the current line unless the user scrolled away; `manual` tracks that),
+    /// `translated` shows Deezer's translation when the track has one.
+    Lyrics {
+        scroll: usize,
+        manual: bool,
+        translated: bool,
+    },
     /// Update available dialog with 3 options.
     UpdateAvailable {
         version: String,
@@ -1474,7 +1479,7 @@ impl ViewState {
             prev_track_id != self.current_track.as_ref().map(|t| t.track_id.clone());
         if track_changed {
             self.lyrics_requested_for = None;
-            if let Some(Overlay::Lyrics { scroll, manual }) = &mut self.overlay {
+            if let Some(Overlay::Lyrics { scroll, manual, .. }) = &mut self.overlay {
                 *scroll = 0;
                 *manual = false;
             }
@@ -3169,7 +3174,11 @@ impl Client {
                 }
                 KeyAction::Continue
             }
-            Overlay::Lyrics { scroll, manual } => {
+            Overlay::Lyrics {
+                scroll,
+                manual,
+                translated,
+            } => {
                 // Scrolls the lyrics; the draw pass auto-follows the current
                 // line until the user scrolls by hand (`manual`).
                 let page = 5usize;
@@ -3203,6 +3212,9 @@ impl Client {
                     }
                     // Resume following the current line.
                     KeyCode::Char('f') => *manual = false,
+                    // Original line ↔ Deezer's translation (per-line fallback
+                    // when a line has no translation).
+                    KeyCode::Char('t') => *translated = !*translated,
                     // Playback keeps working from inside the overlay.
                     code => {
                         if let Some(action) = self.player_control_action(code) {
@@ -3530,6 +3542,7 @@ impl Client {
         self.view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
         // An explicit open retries a previous failure.
         self.view.lyrics_requested_for = None;
@@ -6318,6 +6331,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
         // First ask goes out, the following ones wait for the daemon's answer.
         assert!(matches!(
@@ -6345,6 +6359,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
         assert!(view.pending_lyrics_command().is_none());
     }
@@ -6358,6 +6373,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 12,
             manual: true,
+            translated: false,
         });
         view.lyrics_requested_for = Some("1".into());
 
@@ -6367,7 +6383,7 @@ mod tests {
         });
 
         match &view.overlay {
-            Some(Overlay::Lyrics { scroll, manual }) => {
+            Some(Overlay::Lyrics { scroll, manual, .. }) => {
                 assert_eq!(*scroll, 0);
                 assert!(!*manual);
             }
@@ -6410,6 +6426,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
@@ -6452,6 +6469,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
@@ -6506,6 +6524,7 @@ mod tests {
         view.push_overlay(Overlay::Lyrics {
             scroll: 0,
             manual: false,
+            translated: false,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");

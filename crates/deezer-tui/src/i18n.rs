@@ -198,6 +198,7 @@ pub struct Strings {
     pub lyrics_no_track: &'static str,
     pub lyrics_unsynced_note: &'static str,
     pub lyrics_scroll_hint: &'static str,
+    pub lyrics_translate_hint: &'static str,
 
     // --- Settings ---
     pub settings: &'static str,
@@ -845,6 +846,7 @@ static EN: Strings = Strings {
     lyrics_no_track: "Nothing is playing",
     lyrics_unsynced_note: "Unsynchronized lyrics",
     lyrics_scroll_hint: "Scroll: ↑/↓   Follow: f   Close: Esc",
+    lyrics_translate_hint: "Translate: t",
 
     settings: " Menu ",
     settings_shortcuts: "Keyboard shortcuts",
@@ -1203,6 +1205,7 @@ static FR: Strings = Strings {
     lyrics_no_track: "Aucune lecture en cours",
     lyrics_unsynced_note: "Paroles non synchronisées",
     lyrics_scroll_hint: "Défiler : ↑/↓   Suivre : f   Fermer : Esc",
+    lyrics_translate_hint: "Traduction : t",
 
     settings: " Menu ",
     settings_shortcuts: "Raccourcis clavier",
@@ -1560,6 +1563,7 @@ static ES: Strings = Strings {
     lyrics_no_track: "No hay nada sonando",
     lyrics_unsynced_note: "Letras sin sincronizar",
     lyrics_scroll_hint: "Desplazar: ↑/↓   Seguir: f   Cerrar: Esc",
+    lyrics_translate_hint: "Traducir: t",
 
     settings: " Menu ",
     settings_shortcuts: "Atajos de teclado",
@@ -1917,6 +1921,7 @@ static PT: Strings = Strings {
     lyrics_no_track: "Nada em reprodução",
     lyrics_unsynced_note: "Letras não sincronizadas",
     lyrics_scroll_hint: "Rolar: ↑/↓   Seguir: f   Fechar: Esc",
+    lyrics_translate_hint: "Traduzir: t",
 
     settings: " Menu ",
     settings_shortcuts: "Atalhos do teclado",
@@ -2276,6 +2281,7 @@ static DE: Strings = Strings {
     lyrics_no_track: "Nichts wird abgespielt",
     lyrics_unsynced_note: "Nicht synchronisierter Songtext",
     lyrics_scroll_hint: "Scrollen: ↑/↓   Folgen: f   Schließen: Esc",
+    lyrics_translate_hint: "Übersetzen: t",
     settings_shortcuts: "Tastenkürzel",
     settings_themes: "Themen",
     settings_quality: "Audioqualität",

@@ -62,9 +62,15 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState) {
 
     // Live lyrics: scroll offset auto-follows the current line unless the user
     // scrolled by hand.
-    if let Some(Overlay::Lyrics { scroll, manual }) = &view.overlay {
-        let (new_scroll, new_manual) = draw_lyrics_overlay(frame, view, *scroll, *manual);
-        if let Some(Overlay::Lyrics { scroll, manual }) = &mut view.overlay {
+    if let Some(Overlay::Lyrics {
+        scroll,
+        manual,
+        translated,
+    }) = &view.overlay
+    {
+        let (new_scroll, new_manual) =
+            draw_lyrics_overlay(frame, view, *scroll, *manual, *translated);
+        if let Some(Overlay::Lyrics { scroll, manual, .. }) = &mut view.overlay {
             *scroll = new_scroll;
             *manual = new_manual;
         }
@@ -970,6 +976,7 @@ fn draw_lyrics_overlay(
     view: &ViewState,
     scroll: usize,
     manual: bool,
+    translated: bool,
 ) -> (usize, bool) {
     let s = t();
     let area = frame.area();
@@ -1006,6 +1013,8 @@ fn draw_lyrics_overlay(
 
     // Unsynced lyrics (or a plain fallback) come from `plain`, with no
     // highlight; the footer then carries a "not synced" note.
+    // With the toggle on, each synced line shows Deezer's translation when it
+    // has one, and falls back to the original otherwise.
     let lines: Vec<Line<'static>> = match lyrics {
         Some(l) if synced => l
             .synced
@@ -1017,7 +1026,12 @@ fn draw_lyrics_overlay(
                 } else {
                     Theme::text()
                 };
-                Line::from(Span::styled(line.text.clone(), style))
+                let text = if translated {
+                    line.translated.as_deref().unwrap_or(&line.text)
+                } else {
+                    line.text.as_str()
+                };
+                Line::from(Span::styled(text.to_string(), style))
             })
             .collect(),
         Some(l) => l
@@ -1028,7 +1042,13 @@ fn draw_lyrics_overlay(
         None => Vec::new(),
     };
 
+    // The translate hint only appears on tracks Deezer actually translated.
+    let has_translated =
+        lyrics.is_some_and(|l| l.synced.iter().any(|line| line.translated.is_some()));
     let mut footer = vec![shortcut_hint(s.lyrics_scroll_hint)];
+    if has_translated {
+        footer.push(shortcut_hint(s.lyrics_translate_hint));
+    }
     if lyrics.is_some() && !synced {
         footer.push(Line::from(Span::styled(
             s.lyrics_unsynced_note,
