@@ -6338,6 +6338,7 @@ mod tests {
             synced: vec![LyricLine {
                 at_ms: 0,
                 text: "la".into(),
+                translated: None,
             }],
             ..Lyrics::default()
         });
@@ -6396,10 +6397,12 @@ mod tests {
                 LyricLine {
                     at_ms: 0,
                     text: "first line".into(),
+                    translated: None,
                 },
                 LyricLine {
                     at_ms: 30_000,
                     text: "second line".into(),
+                    translated: None,
                 },
             ],
             ..Lyrics::default()
@@ -6490,10 +6493,12 @@ mod tests {
                 LyricLine {
                     at_ms: 1_000,
                     text: "line one".into(),
+                    translated: None,
                 },
                 LyricLine {
                     at_ms: 1_500,
                     text: "line two".into(),
+                    translated: None,
                 },
             ],
             ..Lyrics::default()

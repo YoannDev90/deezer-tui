@@ -147,7 +147,7 @@ impl DeezerClient {
         // GraphQL helpers do.
         let escaped_id = song_id.replace('\\', "\\\\").replace('"', "\\\"");
         let query = format!(
-            r#"{{ track(trackId: "{escaped_id}") {{ lyrics {{ text copyright writers synchronizedLines {{ line milliseconds duration }} }} }} }}"#
+            r#"{{ track(trackId: "{escaped_id}") {{ lyrics {{ text copyright writers synchronizedLines {{ line lineTranslated milliseconds duration }} }} }} }}"#
         );
 
         let data = self.graphql_call(&query).await?;
@@ -1828,9 +1828,16 @@ fn parse_lyrics(data: &serde_json::Value) -> Option<Lyrics> {
         .filter_map(|line| {
             let at_ms = line.get("milliseconds").and_then(|m| m.as_u64())?;
             let text = line.get("line").and_then(|l| l.as_str()).unwrap_or("");
+            let translated = line
+                .get("lineTranslated")
+                .and_then(|t| t.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
             Some(LyricLine {
                 at_ms,
                 text: text.to_string(),
+                translated,
             })
         })
         .collect();
@@ -2011,9 +2018,9 @@ mod tests {
                 "lyrics": {
                     "text": "Work it\r\n\r\nHarder",
                     "synchronizedLines": [
-                        { "line": "Work it", "milliseconds": 51480, "duration": 1160 },
+                        { "line": "Work it", "lineTranslated": "Travaille-le", "milliseconds": 51480, "duration": 1160 },
                         { "line": "", "milliseconds": null },
-                        { "line": "Harder", "milliseconds": 59710, "duration": 1190 }
+                        { "line": "Harder", "lineTranslated": "  ", "milliseconds": 59710, "duration": 1190 }
                     ],
                     "writers": "Thomas Bangalter",
                     "copyright": "Because"
@@ -2022,17 +2029,20 @@ mod tests {
         });
         let lyrics = parse_lyrics(&data).unwrap();
         // An untimed line can't be placed on the timeline, so it's dropped
-        // from the synced list.
+        // from the synced list. A translation is kept when Deezer provides
+        // one; a blank one counts as none.
         assert_eq!(
             lyrics.synced,
             vec![
                 LyricLine {
                     at_ms: 51480,
-                    text: "Work it".into()
+                    text: "Work it".into(),
+                    translated: Some("Travaille-le".into()),
                 },
                 LyricLine {
                     at_ms: 59710,
-                    text: "Harder".into()
+                    text: "Harder".into(),
+                    translated: None,
                 },
             ]
         );

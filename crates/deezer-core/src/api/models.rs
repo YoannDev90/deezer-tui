@@ -454,6 +454,11 @@ pub struct LyricLine {
     /// Position in the track the line starts at, in milliseconds.
     pub at_ms: u64,
     pub text: String,
+    /// Deezer's translation of the line, when it has one for the listener's
+    /// language. Absent on old payloads and on untranslated tracks, hence the
+    /// serde default for daemon/client version skew.
+    #[serde(default)]
+    pub translated: Option<String>,
 }
 
 /// Track lyrics. `synced` holds time-aligned lines when Deezer has them
@@ -1010,10 +1015,12 @@ mod tests {
                 LyricLine {
                     at_ms: 51_480,
                     text: "Work it".into(),
+                    translated: None,
                 },
                 LyricLine {
                     at_ms: 59_710,
                     text: "Harder".into(),
+                    translated: None,
                 },
             ],
             plain: vec!["Work it".into(), "Harder".into()],
