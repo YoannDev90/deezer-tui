@@ -65,7 +65,9 @@ jobs:
 
   build-macos:
     name: macOS universal
-    runs-on: macos-14
+    # macos-14 was retired on 2026-11-02; macos-15 is the current stable arm64
+    # image (pin, like the Ubuntu runners — no surprise from `macos-latest`).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust
