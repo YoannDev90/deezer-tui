@@ -710,3 +710,118 @@ pub async fn read_line<T: for<'de> Deserialize<'de>, R: tokio::io::AsyncRead + U
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(msg))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every snapshot field is `#[serde(default)]`: an empty payload must
+    /// load — that is what lets a new client talk to an older daemon.
+    #[test]
+    fn snapshot_defaults_when_every_field_is_missing() {
+        let snap: DaemonSnapshot = serde_json::from_value(json!({})).expect("empty snapshot");
+        assert_eq!(snap.screen, Screen::default());
+        assert_eq!(snap.active_tab, ActiveTab::default());
+        assert_eq!(snap.status, PlaybackStatus::Stopped);
+        assert_eq!(snap.position_ms, 0);
+        assert!(snap.lyrics.is_none());
+        assert!(snap.queue.is_empty());
+        assert!(snap.nav_overlay.is_none());
+    }
+
+    /// A partial payload sets the fields it carries and defaults the rest —
+    /// the shape an older daemon's messages take on a newer client.
+    #[test]
+    fn snapshot_takes_known_fields_and_defaults_the_others() {
+        let snap: DaemonSnapshot = serde_json::from_value(json!({
+            "status": "Playing",
+            "position_secs": 42,
+            "position_ms": 42_500,
+            "nav_overlay": { "AlbumDetail": { "from_artist": true } },
+            "nav_overlay_stack": ["PlaylistDetail"]
+        }))
+        .expect("partial snapshot");
+        assert_eq!(snap.status, PlaybackStatus::Playing);
+        assert_eq!(snap.position_secs, 42);
+        assert_eq!(snap.position_ms, 42_500);
+        assert_eq!(
+            snap.nav_overlay,
+            Some(NavOverlay::AlbumDetail { from_artist: true })
+        );
+        assert_eq!(snap.nav_overlay_stack, vec![NavOverlay::PlaylistDetail]);
+        // Untouched fields keep their defaults rather than garbage.
+        assert_eq!(snap.screen, Screen::default());
+        assert!(snap.current_track.is_none());
+    }
+
+    /// A newer daemon sends fields an older client has never heard of: they
+    /// must be ignored instead of failing the parse.
+    #[test]
+    fn snapshot_ignores_unknown_fields() {
+        let snap: DaemonSnapshot = serde_json::from_value(json!({
+            "field_from_the_future": { "anything": true },
+            "lyrics": { "synced": [{ "at_ms": 500, "text": "x" }] }
+        }))
+        .expect("payload with unknown fields");
+        // …including a `LyricLine` predating the `translated` field.
+        assert_eq!(
+            snap.lyrics
+                .as_ref()
+                .and_then(|l| l.synced.first())
+                .map(|l| l.translated.as_deref()),
+            Some(None)
+        );
+    }
+
+    /// serialize → deserialize → serialize must be stable and preserve the
+    /// values: this is the wire format every daemon/client pair agrees on.
+    #[test]
+    fn snapshot_round_trips_without_losing_or_inventing_fields() {
+        let snap: DaemonSnapshot = serde_json::from_value(json!({
+            "screen": "Main",
+            "status": "Paused",
+            "position_ms": 12_345,
+            "volume": 0.75,
+            "lyrics": {
+                "synced": [{ "at_ms": 1000, "text": "la la", "translated": "lo lo" }],
+                "plain": ["la la"],
+                "writers": "W",
+                "copyright": "C"
+            },
+            "lyrics_track_id": "3135556",
+            "nav_overlay": { "AlbumDetail": { "from_artist": false } }
+        }))
+        .expect("populated snapshot");
+
+        let once = serde_json::to_value(&snap).expect("serialize");
+        let back: DaemonSnapshot = serde_json::from_value(once.clone()).expect("reparse");
+        let twice = serde_json::to_value(&back).expect("reserialize");
+        assert_eq!(once, twice);
+
+        assert_eq!(back.screen, Screen::Main);
+        assert_eq!(back.status, PlaybackStatus::Paused);
+        assert_eq!(back.position_ms, 12_345);
+        assert_eq!(back.volume, 0.75);
+        let lyrics = back.lyrics.as_ref().expect("lyrics");
+        assert_eq!(
+            lyrics.synced[0].translated.as_deref(),
+            Some("lo lo"),
+            "the translated lyric field must survive the trip"
+        );
+    }
+
+    /// The tick is its own message type with the same defaulting rules.
+    #[test]
+    fn tick_round_trips_and_defaults_missing_fields() {
+        let tick: PlaybackTick =
+            serde_json::from_value(json!({ "position_secs": 7 })).expect("partial tick");
+        assert_eq!(tick.position_secs, 7);
+        assert_eq!(tick.position_ms, 0);
+        assert_eq!(tick.status, PlaybackStatus::Stopped);
+
+        let once = serde_json::to_value(tick).expect("serialize");
+        let back: PlaybackTick = serde_json::from_value(once.clone()).expect("reparse");
+        assert_eq!(serde_json::to_value(back).expect("reserialize"), once);
+    }
+}
