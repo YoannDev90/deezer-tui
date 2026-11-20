@@ -35,7 +35,7 @@ md-5 = "0.10"
 biquad = "0.6"
 
 # Audio decoding & playback
-symphonia = { version = "0.5", features = ["mp3", "flac", "pcm"] }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "pcm"] }
 rodio = { version = "0.19", default-features = false, features = ["symphonia-mp3", "symphonia-flac"] }
 
 # Streaming
