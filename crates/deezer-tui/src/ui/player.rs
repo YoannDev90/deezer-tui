@@ -19,11 +19,16 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
 
     // Optional now-playing cover on the left (spans all content rows).
     let has_np_cover = view.now_playing_image.is_some();
-    let (cover_area, content_area) = if has_np_cover && inner.width > 12 {
+    let (cover_area, content_area) = if has_np_cover && inner.width > 24 {
+        // Keep the cover roughly square (terminal cells are ~2:1 height:width).
+        // A larger area greatly improves clarity, especially with halfblock fallback.
+        let cover_w = (inner.height.saturating_mul(2))
+            .min(18)
+            .min(inner.width.saturating_sub(16));
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(6),
+                Constraint::Length(cover_w),
                 Constraint::Length(1),
                 Constraint::Min(1),
             ])
@@ -39,6 +44,15 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
         frame.render_stateful_widget(image_widget, area, proto);
     }
 
+    // Center the 3 text rows vertically within the (possibly taller) player bar.
+    let text_h = 3u16.min(content_area.height);
+    let vpad = content_area.height.saturating_sub(text_h) / 2;
+    let text_area = Rect {
+        x: content_area.x,
+        y: content_area.y + vpad,
+        width: content_area.width,
+        height: text_h,
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -46,7 +60,7 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
             Constraint::Length(1), // Progress bar + volume
             Constraint::Length(1), // Controls + Flow button
         ])
-        .split(content_area);
+        .split(text_area);
 
     // Track info line
     let status_icon = match view.status {

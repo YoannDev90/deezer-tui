@@ -22,7 +22,8 @@ use crate::protocol::{ActiveTab, Screen};
 use crate::theme::Theme;
 
 /// Height in rows of the always-visible bottom player bar.
-pub const PLAYER_BAR_HEIGHT: u16 = 4;
+/// Taller than the 3 text rows to give the now-playing cover room to render clearly.
+pub const PLAYER_BAR_HEIGHT: u16 = 8;
 
 /// Root draw function — dispatches to the correct screen.
 pub fn draw(frame: &mut Frame, view: &mut ViewState) {

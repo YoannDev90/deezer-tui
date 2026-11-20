@@ -2195,7 +2195,10 @@ fn draw_toast(frame: &mut Frame, message: &str, is_error: bool) {
     let width = (message.len() as u16 + 6).min(area.width.saturating_sub(4));
     let height = 3;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height.saturating_sub(height + 5); // Above the player bar
+    let y = area.y.saturating_add(
+        area.height
+            .saturating_sub(height + super::PLAYER_BAR_HEIGHT + 1),
+    ); // Above the player bar
 
     let toast_area = Rect::new(x, y, width, height);
     frame.render_widget(Clear, toast_area);
