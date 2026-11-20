@@ -1502,9 +1502,10 @@ impl Daemon {
             user_name: self.user_name.clone(),
             is_offline: self.is_offline,
         };
-        // Ship only what the active tab renders; the lists come back in full
-        // on the snapshot following a tab switch.
-        snap.prune_inactive_tabs();
+        // Ship only what's on screen (active tab + open detail pages); the
+        // data comes back in full on the snapshot following a tab switch or
+        // a detail page opening.
+        snap.prune_offscreen_data();
         snap
     }
 

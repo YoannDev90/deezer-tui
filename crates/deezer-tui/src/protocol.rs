@@ -410,8 +410,9 @@ pub struct MoodEntry {
 /// Complete state snapshot sent from daemon to client.
 /// All fields use `#[serde(default)]` for forward/backward compatibility
 /// when daemon and client are running different binary versions.
-/// Lists of tabs other than `active_tab` are emptied before it goes on the
-/// wire — see [`DaemonSnapshot::prune_inactive_tabs`].
+/// Data no current screen renders (inactive tab lists, closed detail pages)
+/// is emptied before it goes on the wire — see
+/// [`DaemonSnapshot::prune_offscreen_data`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonSnapshot {
     #[serde(default)]
@@ -601,18 +602,23 @@ pub struct DaemonSnapshot {
 }
 
 impl DaemonSnapshot {
-    /// Drop the lists the active tab doesn't render, so a snapshot carries
-    /// one tab's data instead of every tab's at once (radios alone are ~300
-    /// entries, search results embed full tracks).
+    /// Drop the data no current screen renders: the lists of tabs other than
+    /// `active_tab` (plus, on Explore, the sub-categories that aren't on
+    /// screen) and detail pages that are neither open nor one pop away.
     ///
     /// This only shapes the wire: the daemon keeps its own copies for every
-    /// command, and the lists come back in full on the next snapshot after a
-    /// tab switch. Fields needed outside their tab are never touched —
-    /// `favorite_*_ids` (hearts), `offline_track_ids` (download badges) and
-    /// `playlists` (the picker popup opens from any tab) — and neither are
-    /// the selection/loading flags, so switching back restores the tab as it
-    /// was left.
-    pub fn prune_inactive_tabs(&mut self) {
+    /// command, and the data comes back in full on the next snapshot after a
+    /// tab switch or a detail page opening. Fields needed outside their tab
+    /// are never touched — `favorite_*_ids` (hearts), `offline_track_ids`
+    /// (download badges) and `playlists` (the picker popup opens from any
+    /// tab) — and neither are the selection/loading flags, so switching back
+    /// restores the tab as it was left.
+    ///
+    /// `playlist_detail` is deliberately never pruned: podcast show pages
+    /// (`Overlay::ShowDetail`) render from it too, and they have no
+    /// [`NavOverlay`] counterpart, so the daemon cannot see them and would
+    /// blank every open show page.
+    pub fn prune_offscreen_data(&mut self) {
         if self.active_tab != ActiveTab::Search {
             self.search_display.clear();
         }
@@ -648,6 +654,23 @@ impl DaemonSnapshot {
             self.offline_tracks.clear();
             self.offline_albums.clear();
             self.offline_playlists.clear();
+        }
+
+        // A detail page is on screen when it is the top nav overlay, or
+        // stacked underneath it (one pop away — dropping it would blank the
+        // page the user is returning to).
+        let top = self.nav_overlay.as_ref();
+        let stack = self.nav_overlay_stack.as_slice();
+        let on_path =
+            |want: fn(&NavOverlay) -> bool| top.is_some_and(want) || stack.iter().any(want);
+        if !on_path(|n| matches!(n, NavOverlay::AlbumDetail { .. })) {
+            self.album_detail = None;
+        }
+        if !on_path(|n| matches!(n, NavOverlay::ArtistDetail)) {
+            self.artist_detail = None;
+        }
+        if !on_path(|n| matches!(n, NavOverlay::GenreDetail)) {
+            self.genre_detail = None;
         }
     }
 }
@@ -923,6 +946,33 @@ mod tests {
         snap.favorite_track_ids = vec!["10".into()];
         snap.offline_track_ids = vec!["20".into()];
         snap.search_selected = 3;
+        snap.album_detail = Some(AlbumDetail {
+            album_id: "1".into(),
+            title: "album".into(),
+            artist: "artist".into(),
+            nb_tracks: 1,
+            release_date: String::new(),
+            cover_url: String::new(),
+            label: String::new(),
+            tracks: Vec::new(),
+        });
+        snap.artist_detail = Some(ArtistDetail {
+            artist_id: "1".into(),
+            name: "artist".into(),
+            nb_fan: 1,
+            picture_url: String::new(),
+            top_tracks: Vec::new(),
+            albums: Vec::new(),
+            similar_artists: Vec::new(),
+        });
+        snap.genre_detail = Some(GenreDetail::default());
+        snap.playlist_detail = Some(PlaylistDetail {
+            playlist_id: "1".into(),
+            title: "playlist".into(),
+            creator: String::new(),
+            nb_tracks: 1,
+            tracks: Vec::new(),
+        });
         snap
     }
 
@@ -930,10 +980,10 @@ mod tests {
     /// depend on (hearts, download badges, the picker) and the selection
     /// flags always do.
     #[test]
-    fn prune_inactive_tabs_ships_only_the_active_tab() {
+    fn prune_offscreen_data_ships_only_the_active_tab() {
         let mut snap = full_snapshot();
         snap.active_tab = ActiveTab::Search;
-        snap.prune_inactive_tabs();
+        snap.prune_offscreen_data();
         assert_eq!(snap.search_display.len(), 1);
         assert!(snap.favorites_display.is_empty());
         assert!(snap.radios.is_empty() && snap.moods.is_empty() && snap.genres.is_empty());
@@ -953,7 +1003,7 @@ mod tests {
 
         let mut snap = full_snapshot();
         snap.active_tab = ActiveTab::Favorites;
-        snap.prune_inactive_tabs();
+        snap.prune_offscreen_data();
         assert_eq!(snap.favorites_display.len(), 1);
         assert!(snap.search_display.is_empty());
 
@@ -966,7 +1016,7 @@ mod tests {
             let mut snap = full_snapshot();
             snap.active_tab = ActiveTab::Explore;
             snap.explore_category = category;
-            snap.prune_inactive_tabs();
+            snap.prune_offscreen_data();
             let (radios, moods, genres) = (snap.radios.len(), snap.moods.len(), snap.genres.len());
             let shipped = radios + moods + genres;
             assert_eq!(shipped, kept, "{category:?} ships exactly one list");
@@ -983,8 +1033,43 @@ mod tests {
 
         let mut snap = full_snapshot();
         snap.active_tab = ActiveTab::Downloads;
-        snap.prune_inactive_tabs();
+        snap.prune_offscreen_data();
         assert_eq!(snap.offline_tracks.len(), 1);
         assert!(snap.radios.is_empty() && snap.search_display.is_empty());
+    }
+
+    /// Detail pages ride only while they are on the nav path: open at the
+    /// top, or stacked underneath (one pop away — dropping those would blank
+    /// the page the user is returning to). `playlist_detail` is never
+    /// pruned, because show pages render from it and the daemon cannot see
+    /// them.
+    #[test]
+    fn prune_offscreen_data_keeps_only_detail_pages_on_the_nav_path() {
+        // Nothing open: every detail page goes, shows' data stays.
+        let mut snap = full_snapshot();
+        snap.nav_overlay = None;
+        snap.nav_overlay_stack.clear();
+        snap.prune_offscreen_data();
+        assert!(snap.album_detail.is_none());
+        assert!(snap.artist_detail.is_none());
+        assert!(snap.genre_detail.is_none());
+        assert!(snap.playlist_detail.is_some(), "show pages render from it");
+
+        // Open at the top: kept, the others go.
+        let mut snap = full_snapshot();
+        snap.nav_overlay = Some(NavOverlay::AlbumDetail { from_artist: false });
+        snap.prune_offscreen_data();
+        assert!(snap.album_detail.is_some());
+        assert!(snap.artist_detail.is_none());
+        assert!(snap.genre_detail.is_none());
+
+        // Stacked underneath: one pop away, so it must stay too.
+        let mut snap = full_snapshot();
+        snap.nav_overlay = Some(NavOverlay::ArtistDetail);
+        snap.nav_overlay_stack = vec![NavOverlay::AlbumDetail { from_artist: true }];
+        snap.prune_offscreen_data();
+        assert!(snap.album_detail.is_some(), "reachable by popping back");
+        assert!(snap.artist_detail.is_some());
+        assert!(snap.genre_detail.is_none());
     }
 }
