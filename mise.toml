@@ -8,6 +8,13 @@
 [tools]
 pre-commit = "4.6.2"
 
+[env]
+# openssl-sys 0.9.112 is incompatible with the system OpenSSL 4.x headers/libs.
+# Point builds (and rust-analyzer, when using mise env) at the distro's OpenSSL 3.
+PKG_CONFIG_PATH = "/usr/lib/openssl-3/pkgconfig"
+OPENSSL_LIB_DIR = "/usr/lib/openssl-3"
+OPENSSL_INCLUDE_DIR = "/usr/include/openssl-3"
+
 [tasks.build]
 description = "Build the binary in debug mode"
 run = "cargo build"
