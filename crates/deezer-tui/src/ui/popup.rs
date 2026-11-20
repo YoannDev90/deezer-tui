@@ -1192,6 +1192,11 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
     } else {
         "OFF [e]"
     };
+    let images_status = match view.image_mode {
+        deezer_core::config::ImageMode::Auto => "AUTO",
+        deezer_core::config::ImageMode::On => "ON",
+        deezer_core::config::ImageMode::Off => "OFF",
+    };
     let entries: &[(&str, &str)] = &[
         (s.settings_shortcuts, "?"),
         (s.settings_themes, ""),
@@ -1199,6 +1204,7 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
         (s.settings_equalizer, eq_status),
         (s.settings_language, ""),
         (s.settings_vim_keys, vim_status),
+        (s.settings_images, images_status),
         (s.settings_logout, ""),
         (s.settings_background, "Ctrl+Z"),
         (s.settings_quit, "Ctrl+Q"),
@@ -1251,6 +1257,12 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
                     }
                 } else if i == 5 {
                     if view.vim_keys {
+                        Style::default().fg(Theme::primary())
+                    } else {
+                        Theme::dim()
+                    }
+                } else if i == 6 {
+                    if view.image_mode != deezer_core::config::ImageMode::Off {
                         Style::default().fg(Theme::primary())
                     } else {
                         Theme::dim()

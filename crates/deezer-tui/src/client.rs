@@ -28,7 +28,7 @@ use deezer_core::api::models::{
     AlbumDetail, ArtistDetail, ArtistSubTab, AudioQuality, DisplayItem, ItemKind, Lyrics,
     PlaylistData, PlaylistDetail, TrackData,
 };
-use deezer_core::config::Config;
+use deezer_core::config::{Config, ImageMode};
 use deezer_core::player::eq::{EqPreset, EqSettings, EQ_BAND_COUNT};
 use deezer_core::player::state::{PlaybackStatus, RepeatMode};
 
@@ -925,14 +925,22 @@ pub struct ViewState {
     pub nav_synced_from_daemon: bool,
     pub toast: Option<Toast>,
 
-    // Cover art image (client-side only)
+    /// Cover art rendering mode (auto/on/off), loaded from config.
+    pub image_mode: ImageMode,
+
+    // Cover art image (detail overlays, client-side only)
     pub cover_image: Option<StatefulProtocol>,
-    /// URL of the currently loaded cover image (to avoid re-fetching).
+    /// URL of the currently loaded detail cover image (to avoid re-fetching).
     pub cover_image_url: String,
-    /// Screen rect where the real cover image was last drawn, so overlays can
+    /// Screen rect where the real detail cover image was last drawn, so overlays can
     /// dim the background around it without touching the image cells (dimming
     /// sixel/kitty image cells corrupts the artwork). `None` when no image.
     pub cover_image_area: Option<Rect>,
+
+    // Cover art image (now playing, client-side only)
+    pub now_playing_image: Option<StatefulProtocol>,
+    /// URL of the currently loaded now-playing cover image.
+    pub now_playing_image_url: String,
 
     /// Button area set by the UI draw pass, used for mouse hit-testing.
     pub login_button_area: Cell<Option<Rect>>,
@@ -1127,9 +1135,12 @@ impl ViewState {
             nav_commands: Vec::new(),
             nav_synced_from_daemon: true, // initial snapshot was consumed in the constructor
             toast: None,
+            image_mode: Config::load().images,
             cover_image: None,
             cover_image_url: String::new(),
             cover_image_area: None,
+            now_playing_image: None,
+            now_playing_image_url: String::new(),
             login_button_area: Cell::new(None),
             click: RefCell::default(),
             scroll: RefCell::default(),
@@ -1979,8 +1990,10 @@ pub struct Client {
     picker: Picker,
     image_tx: mpsc::UnboundedSender<(String, image::DynamicImage)>,
     image_rx: mpsc::UnboundedReceiver<(String, image::DynamicImage)>,
-    /// Cache of downloaded images by URL, cleared when leaving overlay pages.
+    /// Cache of downloaded images by URL.
     image_cache: HashMap<String, image::DynamicImage>,
+    /// Insertion/use order for `image_cache` (simple LRU bounding).
+    image_cache_order: Vec<String>,
     /// Cell and time of the last left click, for double-click detection.
     last_click: Option<(u16, u16, Instant)>,
     /// Last string written to the terminal title, to avoid rewriting it on
@@ -2060,13 +2073,32 @@ impl Client {
             image_tx,
             image_rx,
             image_cache: HashMap::new(),
+            image_cache_order: Vec::new(),
             last_click: None,
             last_terminal_title: String::new(),
         })
     }
 
+    /// Build a Deezer CDN cover URL from an `ALB_PICTURE` md5 hash.
+    fn cover_url_from_hash(album_picture: &str) -> Option<String> {
+        if album_picture.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "https://e-cdns-images.dzcdn.net/images/cover/{album_picture}/500x500-000000-80-0-0.jpg"
+        ))
+    }
+
+    /// Cover art URL for the currently playing track (album picture hash).
+    fn now_playing_cover_url(&self) -> Option<String> {
+        self.view
+            .current_track
+            .as_ref()
+            .and_then(|t| Self::cover_url_from_hash(&t.album_picture))
+    }
+
     /// Get the current cover art URL from album/artist detail overlay.
-    fn current_cover_url(&self) -> Option<&str> {
+    fn detail_cover_url(&self) -> Option<&str> {
         // Search overlay chain (current + stack) for an active album/artist detail.
         let active = std::iter::once(self.view.overlay.as_ref())
             .chain(self.view.overlay_stack.iter().rev().map(Some))
@@ -2109,52 +2141,96 @@ impl Client {
         }
     }
 
-    /// Trigger async image fetch if the cover URL changed.
-    /// Uses in-memory cache to avoid re-downloading images already seen on this page.
-    fn maybe_fetch_cover_image(&mut self) {
-        let url = match self.current_cover_url() {
-            Some(u) => u.to_string(),
-            None => {
-                // No overlay or no URL — clear image and cache
-                if self.view.cover_image.is_some() {
-                    self.view.cover_image = None;
-                    self.view.cover_image_url.clear();
-                }
-                self.image_cache.clear();
-                return;
-            }
-        };
-
-        if url == self.view.cover_image_url {
-            return; // Already loaded or loading
+    fn images_enabled(&self) -> bool {
+        match self.view.image_mode {
+            ImageMode::Off => false,
+            ImageMode::On => true,
+            // Auto: the picker was created from terminal capability detection
+            // (falls back to halfblocks when unsupported).
+            ImageMode::Auto => true,
         }
+    }
 
-        // Mark as loading this URL (prevents re-triggering)
-        self.view.cover_image_url = url.clone();
-        self.view.cover_image = None;
+    fn cache_image(&mut self, url: String, img: image::DynamicImage) {
+        const MAX_CACHE: usize = 64;
+        if !self.image_cache.contains_key(&url) {
+            self.image_cache_order.push(url.clone());
+        }
+        self.image_cache.insert(url, img);
+        while self.image_cache.len() > MAX_CACHE {
+            if let Some(old) = self.image_cache_order.first().cloned() {
+                self.image_cache_order.remove(0);
+                self.image_cache.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
 
-        // Check cache first — instant display without HTTP fetch
-        if let Some(img) = self.image_cache.get(&url) {
-            let proto = self.picker.new_resize_protocol(img.clone());
-            self.view.cover_image = Some(proto);
+    fn ensure_image_for_slot(
+        &mut self,
+        slot_url: &mut String,
+        slot_img: &mut Option<StatefulProtocol>,
+        desired: Option<String>,
+    ) {
+        match desired {
+            None => {
+                slot_url.clear();
+                *slot_img = None;
+            }
+            Some(url) => {
+                if *slot_url == url {
+                    return;
+                }
+                *slot_url = url.clone();
+                *slot_img = None;
+                if let Some(img) = self.image_cache.get(&url) {
+                    *slot_img = Some(self.picker.new_resize_protocol(img.clone()));
+                    return;
+                }
+                let tx = self.image_tx.clone();
+                tokio::spawn(async move {
+                    match reqwest::get(&url).await {
+                        Ok(resp) => {
+                            if let Ok(bytes) = resp.bytes().await {
+                                if let Ok(img) = image::load_from_memory(&bytes) {
+                                    let _ = tx.send((url, img));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to fetch cover image: {e}");
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Trigger async image fetches for active image slots (detail + now playing).
+    fn maybe_fetch_cover_image(&mut self) {
+        if !self.images_enabled() {
+            self.view.cover_image = None;
+            self.view.cover_image_url.clear();
+            self.view.now_playing_image = None;
+            self.view.now_playing_image_url.clear();
             return;
         }
 
-        let tx = self.image_tx.clone();
-        tokio::spawn(async move {
-            match reqwest::get(&url).await {
-                Ok(resp) => {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if let Ok(img) = image::load_from_memory(&bytes) {
-                            let _ = tx.send((url, img));
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Failed to fetch cover image: {e}");
-                }
-            }
-        });
+        let detail = self.detail_cover_url().map(|s| s.to_string());
+        let now_playing = self.now_playing_cover_url();
+
+        let mut detail_url = std::mem::take(&mut self.view.cover_image_url);
+        let mut detail_img = self.view.cover_image.take();
+        self.ensure_image_for_slot(&mut detail_url, &mut detail_img, detail);
+        self.view.cover_image_url = detail_url;
+        self.view.cover_image = detail_img;
+
+        let mut np_url = std::mem::take(&mut self.view.now_playing_image_url);
+        let mut np_img = self.view.now_playing_image.take();
+        self.ensure_image_for_slot(&mut np_url, &mut np_img, now_playing);
+        self.view.now_playing_image_url = np_url;
+        self.view.now_playing_image = np_img;
     }
 
     /// Build the window/tab title for a track: `deezer-tui: ▶ ♥ Title — Artist`.
@@ -2518,11 +2594,18 @@ impl Client {
 
             // Check for completed image fetches
             while let Ok((url, img)) = self.image_rx.try_recv() {
-                self.image_cache.insert(url.clone(), img.clone());
-                if url == self.view.cover_image_url {
-                    let proto = self.picker.new_resize_protocol(img);
-                    self.view.cover_image = Some(proto);
-                    dirty = true;
+                self.cache_image(url.clone(), img.clone());
+                if self.images_enabled() {
+                    if url == self.view.cover_image_url {
+                        let proto = self.picker.new_resize_protocol(img.clone());
+                        self.view.cover_image = Some(proto);
+                        dirty = true;
+                    }
+                    if url == self.view.now_playing_image_url {
+                        let proto = self.picker.new_resize_protocol(img);
+                        self.view.now_playing_image = Some(proto);
+                        dirty = true;
+                    }
                 }
             }
 
@@ -3140,6 +3223,10 @@ impl Client {
 
     /// Handle key events when an overlay is open.
     fn handle_overlay_key(&mut self, key: KeyEvent) -> KeyAction {
+        if matches!(self.view.overlay, Some(Overlay::Settings { .. })) {
+            return self.handle_settings_overlay_key(key);
+        }
+
         let vim_keys = self.view.vim_keys;
         let overlay = self.view.overlay.as_mut().unwrap();
         match overlay {
@@ -3224,93 +3311,6 @@ impl Client {
                             return action;
                         }
                     }
-                }
-                KeyAction::Continue
-            }
-            Overlay::Settings { selected } => {
-                const SETTINGS_COUNT: usize = 9;
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.view.pop_overlay();
-                    }
-                    code if ViewState::nav_up(code, vim_keys) => {
-                        *selected = selected.saturating_sub(1);
-                    }
-                    code if ViewState::nav_down(code, vim_keys) => {
-                        *selected = (*selected + 1).min(SETTINGS_COUNT - 1);
-                    }
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if *selected == 5 => {
-                        self.view.vim_keys = !self.view.vim_keys;
-                        let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
-                    }
-                    KeyCode::Enter => {
-                        match *selected {
-                            0 => {
-                                // Keyboard shortcuts
-                                self.view.push_overlay(Overlay::Help { scroll: 0 });
-                                return KeyAction::Continue;
-                            }
-                            1 => {
-                                // Themes
-                                let current = Theme::current();
-                                let idx =
-                                    ThemeId::ALL.iter().position(|&t| t == current).unwrap_or(0);
-                                self.view
-                                    .push_overlay(Overlay::ThemePicker { selected: idx });
-                                return KeyAction::Continue;
-                            }
-                            2 => {
-                                // Audio quality
-                                let current = self.view.quality;
-                                let idx = AudioQuality::ALL
-                                    .iter()
-                                    .position(|&q| q == current)
-                                    .unwrap_or(1);
-                                self.view
-                                    .push_overlay(Overlay::QualityPicker { selected: idx });
-                                return KeyAction::Continue;
-                            }
-                            3 => {
-                                // Equalizer
-                                self.view.push_overlay(Overlay::Equalizer { column: 1 });
-                                return KeyAction::Continue;
-                            }
-                            4 => {
-                                // Language
-                                let current = i18n::current_locale();
-                                let idx =
-                                    Locale::ALL.iter().position(|&l| l == current).unwrap_or(0);
-                                self.view
-                                    .push_overlay(Overlay::LanguagePicker { selected: idx });
-                                return KeyAction::Continue;
-                            }
-                            5 => {
-                                // Vim navigation keys toggle
-                                self.view.vim_keys = !self.view.vim_keys;
-                                let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
-                                return KeyAction::Continue;
-                            }
-                            6 => {
-                                // Logout
-                                self.view.pop_overlay();
-                                return KeyAction::SendCommand(Command::Logout);
-                            }
-                            7 => {
-                                // Send to background
-                                return KeyAction::Detach;
-                            }
-                            8 => {
-                                // Quit
-                                return KeyAction::Quit;
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-                // Also close on Ctrl+O
-                if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.view.pop_overlay();
                 }
                 KeyAction::Continue
             }
@@ -3509,7 +3509,109 @@ impl Client {
                 // Ignore all keys while update is in progress
                 KeyAction::Continue
             }
+            Overlay::Settings { .. } => unreachable!("handled above"),
         }
+    }
+
+    /// Handle key events in the settings overlay.
+    fn handle_settings_overlay_key(&mut self, key: KeyEvent) -> KeyAction {
+        const SETTINGS_COUNT: usize = 10;
+        let vim_keys = self.view.vim_keys;
+        let mut selected = match self.view.overlay {
+            Some(Overlay::Settings { selected }) => selected,
+            _ => return KeyAction::Continue,
+        };
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.view.pop_overlay();
+                return KeyAction::Continue;
+            }
+            code if ViewState::nav_up(code, vim_keys) => {
+                selected = selected.saturating_sub(1);
+            }
+            code if ViewState::nav_down(code, vim_keys) => {
+                selected = (selected + 1).min(SETTINGS_COUNT - 1);
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 5 => {
+                self.view.vim_keys = !self.view.vim_keys;
+                let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 6 => {
+                self.view.image_mode = self.view.image_mode.next();
+                let _ = Config::update(|c| c.images = self.view.image_mode);
+                self.maybe_fetch_cover_image();
+            }
+            KeyCode::Enter => match selected {
+                0 => {
+                    self.view.push_overlay(Overlay::Help { scroll: 0 });
+                    return KeyAction::Continue;
+                }
+                1 => {
+                    let current = Theme::current();
+                    let idx = ThemeId::ALL.iter().position(|&t| t == current).unwrap_or(0);
+                    self.view
+                        .push_overlay(Overlay::ThemePicker { selected: idx });
+                    return KeyAction::Continue;
+                }
+                2 => {
+                    let current = self.view.quality;
+                    let idx = AudioQuality::ALL
+                        .iter()
+                        .position(|&q| q == current)
+                        .unwrap_or(1);
+                    self.view
+                        .push_overlay(Overlay::QualityPicker { selected: idx });
+                    return KeyAction::Continue;
+                }
+                3 => {
+                    self.view.push_overlay(Overlay::Equalizer { column: 1 });
+                    return KeyAction::Continue;
+                }
+                4 => {
+                    let current = i18n::current_locale();
+                    let idx = Locale::ALL.iter().position(|&l| l == current).unwrap_or(0);
+                    self.view
+                        .push_overlay(Overlay::LanguagePicker { selected: idx });
+                    return KeyAction::Continue;
+                }
+                5 => {
+                    self.view.vim_keys = !self.view.vim_keys;
+                    let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
+                }
+                6 => {
+                    self.view.image_mode = self.view.image_mode.next();
+                    let _ = Config::update(|c| c.images = self.view.image_mode);
+                    self.maybe_fetch_cover_image();
+                }
+                7 => {
+                    self.view.pop_overlay();
+                    return KeyAction::SendCommand(Command::Logout);
+                }
+                8 => {
+                    return KeyAction::Detach;
+                }
+                9 => {
+                    return KeyAction::Quit;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+
+        // Also close on Ctrl+O
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.view.pop_overlay();
+            return KeyAction::Continue;
+        }
+
+        if let Some(Overlay::Settings {
+            selected: ref mut sel,
+        }) = self.view.overlay
+        {
+            *sel = selected;
+        }
+        KeyAction::Continue
     }
 
     /// Open the full track context menu for the selected track in the current list.

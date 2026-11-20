@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui_image::{Resize, StatefulImage};
 
 use deezer_core::player::state::{PlaybackStatus, RepeatMode};
 
@@ -7,7 +8,7 @@ use crate::client::{ClickTarget, ViewState};
 use crate::i18n::t;
 use crate::theme::Theme;
 
-pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
+pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Theme::border())
@@ -16,6 +17,28 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Optional now-playing cover on the left (spans all content rows).
+    let has_np_cover = view.now_playing_image.is_some();
+    let (cover_area, content_area) = if has_np_cover && inner.width > 12 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+        (Some(cols[0]), cols[2])
+    } else {
+        (None, inner)
+    };
+
+    if let (Some(area), Some(proto)) = (cover_area, view.now_playing_image.as_mut()) {
+        let image_widget = StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default()
+            .resize(Resize::Fit(None));
+        frame.render_stateful_widget(image_widget, area, proto);
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -23,7 +46,7 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
             Constraint::Length(1), // Progress bar + volume
             Constraint::Length(1), // Controls + Flow button
         ])
-        .split(inner);
+        .split(content_area);
 
     // Track info line
     let status_icon = match view.status {

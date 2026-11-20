@@ -11,6 +11,39 @@ const APP_QUALIFIER: &str = "com";
 const APP_ORGANIZATION: &str = "deezer-tui";
 const APP_NAME: &str = "deezer-tui";
 
+/// How cover art images are rendered in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageMode {
+    /// Show images when the terminal supports a graphics protocol.
+    #[default]
+    Auto,
+    /// Always try to show images.
+    On,
+    /// Never show images.
+    Off,
+}
+
+impl ImageMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::On, Self::Off];
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::On,
+            Self::On => Self::Off,
+            Self::Off => Self::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -34,6 +67,9 @@ pub struct Config {
     /// Graphic equalizer settings (disabled by default).
     #[serde(default)]
     pub equalizer: EqSettings,
+    /// Cover art rendering mode.
+    #[serde(default)]
+    pub images: ImageMode,
 }
 
 fn default_quality() -> AudioQuality {
@@ -56,6 +92,7 @@ impl Default for Config {
             bg_transparency: 0,
             vim_keys: false,
             equalizer: EqSettings::default(),
+            images: ImageMode::default(),
         }
     }
 }
