@@ -138,7 +138,7 @@ Audio decoding pure Rust via `symphonia` (MP3 + FLAC), no system codecs needed.
 |--------------|---------------------------|----------------------------------------|
 | Async        | `tokio`                   | Async runtime                          |
 | HTTP         | `reqwest` + `cookie_store`| API calls, session management          |
-| Streaming    | `stream-download`         | Progressive buffered HTTP download     |
+| Streaming    | `reqwest` (`stream.rs`)   | Progressive buffered HTTP download + decrypt |
 | Crypto       | `blowfish`, `cbc`, `md-5` | Track decryption + key derivation      |
 | Decoding     | `symphonia`               | Pure-Rust MP3/FLAC decoder             |
 | Playback     | `rodio` (wraps `cpal`)    | Cross-platform audio output            |

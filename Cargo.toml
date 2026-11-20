@@ -38,9 +38,6 @@ biquad = "0.6"
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "pcm"] }
 rodio = { version = "0.19", default-features = false, features = ["symphonia-mp3", "symphonia-flac"] }
 
-# Streaming
-stream-download = { version = "0.7", features = ["reqwest"] }
-
 # Error handling
 thiserror = "2"
 anyhow = "1"
