@@ -11,6 +11,10 @@ const APP_QUALIFIER: &str = "com";
 const APP_ORGANIZATION: &str = "deezer-tui";
 const APP_NAME: &str = "deezer-tui";
 
+/// Longest crossfade the settings offer, in seconds — the same range as
+/// Deezer's own player.
+pub const MAX_CROSSFADE_SECS: u8 = 12;
+
 /// How cover art images are rendered in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -70,6 +74,9 @@ pub struct Config {
     /// Cover art rendering mode.
     #[serde(default)]
     pub images: ImageMode,
+    /// Crossfade between two tracks, in seconds (0 = off).
+    #[serde(default)]
+    pub crossfade_secs: u8,
 }
 
 fn default_quality() -> AudioQuality {
@@ -93,6 +100,7 @@ impl Default for Config {
             vim_keys: false,
             equalizer: EqSettings::default(),
             images: ImageMode::default(),
+            crossfade_secs: 0,
         }
     }
 }
