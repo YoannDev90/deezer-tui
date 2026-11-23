@@ -189,6 +189,9 @@ pub enum Command {
     SetQuality { quality: AudioQuality },
     /// Replace the equalizer settings (applied live, persisted to config).
     SetEqualizer { settings: EqSettings },
+    /// Set the crossfade length in seconds, 0 = off (applied live,
+    /// persisted to config). Takes effect on the next track queued.
+    SetCrossfade { secs: u8 },
     /// Fetch the lyrics of the currently playing track.
     RequestLyrics,
     /// Graceful shutdown — daemon exits.
@@ -443,6 +446,9 @@ pub struct DaemonSnapshot {
     pub repeat: RepeatMode,
     #[serde(default)]
     pub equalizer: EqSettings,
+    /// Crossfade length in seconds, 0 when it is off.
+    #[serde(default)]
+    pub crossfade_secs: u8,
 
     /// Lyrics of the currently playing track, when the user has requested them
     /// (or when the daemon prefetched them). `None` means "not fetched yet".
@@ -694,6 +700,7 @@ impl Default for DaemonSnapshot {
             shuffle: false,
             repeat: RepeatMode::Off,
             equalizer: EqSettings::default(),
+            crossfade_secs: 0,
             lyrics: None,
             lyrics_track_id: None,
             lyrics_loading: false,

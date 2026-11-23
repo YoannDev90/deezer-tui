@@ -12,6 +12,7 @@ use deezer_core::api::models::{
     Lyrics, PlaylistData, PlaylistDetail, TrackData,
 };
 use deezer_core::api::DeezerClient;
+use deezer_core::config::MAX_CROSSFADE_SECS;
 use deezer_core::offline::OfflineIndex;
 use deezer_core::player::engine::{AudioInput, PlayerEngine};
 use deezer_core::player::eq::EqHandle;
@@ -340,7 +341,10 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new() -> Result<Self> {
-        let config = Config::load();
+        let mut config = Config::load();
+        // A hand-edited file can hold anything; the settings only go up to
+        // `MAX_CROSSFADE_SECS`, and this is what every reader below sees.
+        config.crossfade_secs = config.crossfade_secs.min(MAX_CROSSFADE_SECS);
         let initial_volume = config.volume;
         let initial_quality = config.quality;
         let eq = EqHandle::new(&config.equalizer);
@@ -502,7 +506,12 @@ impl Daemon {
 
         if self.is_offline {
             // In offline mode, create the audio engine immediately (no master key needed for local playback)
-            match PlayerEngine::new([0u8; 16], Arc::clone(&self.player_state), self.eq.clone()) {
+            match PlayerEngine::new(
+                [0u8; 16],
+                Arc::clone(&self.player_state),
+                self.eq.clone(),
+                self.crossfade_len(),
+            ) {
                 Ok(engine) => {
                     engine.set_volume(self.config.volume);
                     self.engine = Some(engine);
@@ -921,6 +930,15 @@ impl Daemon {
                 self.eq.apply(&settings);
                 let _ = Config::update(|c| c.equalizer = settings.clone());
                 self.config.equalizer = settings;
+            }
+            Command::SetCrossfade { secs } => {
+                let secs = secs.min(MAX_CROSSFADE_SECS);
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.set_crossfade(Duration::from_secs(u64::from(secs)));
+                }
+                self.config.crossfade_secs = secs;
+                let _ = Config::update(|c| c.crossfade_secs = secs);
+                info!(secs, "crossfade updated (applies to next track)");
             }
             Command::SetQuality { quality } => {
                 self.config.quality = quality;
@@ -1427,6 +1445,7 @@ impl Daemon {
             shuffle: state.shuffle,
             repeat: state.repeat,
             equalizer: self.config.equalizer.clone(),
+            crossfade_secs: self.config.crossfade_secs,
             lyrics: self.lyrics.clone(),
             lyrics_track_id: self.lyrics_track_id.clone(),
             lyrics_loading: self.lyrics_loading,
@@ -3107,6 +3126,12 @@ impl Daemon {
         }
 
         if engine.try_seek(Duration::from_secs(new_pos)).is_ok() {
+            // A crossfade already running would leave the current track at
+            // partial gain after a seek: give it up, and let the transition
+            // start again from here.
+            if let Some(engine) = self.engine.as_mut() {
+                engine.abort_crossfade();
+            }
             let mut state = self.player_state.lock().unwrap();
             state.position_secs = new_pos;
             state.position_ms = new_pos.saturating_mul(1000);
@@ -3133,7 +3158,12 @@ impl Daemon {
                 AsyncResult::MasterKeyReady(key) => {
                     self.master_key = Some(key);
                     self.status_msg = Some(t().status_ready.into());
-                    match PlayerEngine::new(key, Arc::clone(&self.player_state), self.eq.clone()) {
+                    match PlayerEngine::new(
+                        key,
+                        Arc::clone(&self.player_state),
+                        self.eq.clone(),
+                        self.crossfade_len(),
+                    ) {
                         Ok(engine) => {
                             engine.set_volume(self.config.volume);
                             self.engine = Some(engine);
@@ -4100,7 +4130,18 @@ impl Daemon {
         });
     }
 
+    /// Crossfade length the engine should use, from the settings.
+    fn crossfade_len(&self) -> Duration {
+        Duration::from_secs(u64::from(self.config.crossfade_secs))
+    }
+
     fn on_tick(&mut self) {
+        // Open the crossfade window once the current track is close enough
+        // to its end; the ramps themselves run on samples.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.pump_crossfade();
+        }
+
         // The queued track took over without a gap: move the queue along.
         // play_next lands on that track, which start_play_track recognizes.
         if self
