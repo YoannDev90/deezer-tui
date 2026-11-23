@@ -28,7 +28,7 @@ use deezer_core::api::models::{
     AlbumDetail, ArtistDetail, ArtistSubTab, AudioQuality, DisplayItem, ItemKind, Lyrics,
     PlaylistData, PlaylistDetail, TrackData,
 };
-use deezer_core::config::{Config, ImageMode};
+use deezer_core::config::{Config, ImageMode, MAX_CROSSFADE_SECS};
 use deezer_core::player::eq::{EqPreset, EqSettings, EQ_BAND_COUNT};
 use deezer_core::player::state::{PlaybackStatus, RepeatMode};
 
@@ -546,6 +546,8 @@ pub enum Overlay {
     ThemePicker { selected: usize },
     /// Audio quality picker.
     QualityPicker { selected: usize },
+    /// Crossfade length picker: 0 is off, n is n seconds.
+    CrossfadePicker { selected: usize },
     /// Language picker.
     LanguagePicker { selected: usize },
     /// Graphic equalizer; `column` is the focused column: 0 is the global
@@ -810,6 +812,8 @@ pub struct ViewState {
     pub duration_secs: u64,
     pub volume: f32,
     pub equalizer: EqSettings,
+    /// Crossfade length in seconds, 0 when it is off.
+    pub crossfade_secs: u8,
     pub shuffle: bool,
     pub repeat: RepeatMode,
     pub queue: Vec<TrackData>,
@@ -1031,6 +1035,7 @@ impl ViewState {
             duration_secs: snap.duration_secs,
             volume: snap.volume,
             equalizer: snap.equalizer.clone(),
+            crossfade_secs: snap.crossfade_secs,
             shuffle: snap.shuffle,
             repeat: snap.repeat,
             queue: snap.queue.clone(),
@@ -1270,6 +1275,7 @@ impl ViewState {
                     | Overlay::Settings { .. }
                     | Overlay::ThemePicker { .. }
                     | Overlay::QualityPicker { .. }
+                    | Overlay::CrossfadePicker { .. }
                     | Overlay::LanguagePicker { .. }
                     | Overlay::Equalizer { .. }
                     | Overlay::Info { .. }
@@ -1445,6 +1451,7 @@ impl ViewState {
         self.duration_secs = snap.duration_secs;
         self.volume = snap.volume;
         self.equalizer = snap.equalizer;
+        self.crossfade_secs = snap.crossfade_secs;
         self.shuffle = snap.shuffle;
         self.repeat = snap.repeat;
         self.queue = snap.queue;
@@ -3421,6 +3428,29 @@ impl Client {
                 }
                 KeyAction::Continue
             }
+            Overlay::CrossfadePicker { selected } => {
+                // 0 is off, n is n seconds.
+                let count = usize::from(MAX_CROSSFADE_SECS) + 1;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.view.pop_overlay();
+                    }
+                    code if ViewState::nav_up(code, vim_keys) => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    code if ViewState::nav_down(code, vim_keys) => {
+                        *selected = (*selected + 1).min(count - 1);
+                    }
+                    KeyCode::Enter => {
+                        let secs = u8::try_from(*selected).unwrap_or(MAX_CROSSFADE_SECS);
+                        self.view.crossfade_secs = secs;
+                        self.view.pop_overlay();
+                        return KeyAction::SendCommand(Command::SetCrossfade { secs });
+                    }
+                    _ => {}
+                }
+                KeyAction::Continue
+            }
             Overlay::AlbumDetail { .. } => self.handle_album_detail_key(key),
             Overlay::ArtistDetail => self.handle_artist_detail_key(key),
             Overlay::PlaylistDetail { .. } => self.handle_playlist_detail_key(key),
@@ -3515,7 +3545,7 @@ impl Client {
 
     /// Handle key events in the settings overlay.
     fn handle_settings_overlay_key(&mut self, key: KeyEvent) -> KeyAction {
-        const SETTINGS_COUNT: usize = 10;
+        const SETTINGS_COUNT: usize = 11;
         let vim_keys = self.view.vim_keys;
         let mut selected = match self.view.overlay {
             Some(Overlay::Settings { selected }) => selected,
@@ -3533,11 +3563,11 @@ impl Client {
             code if ViewState::nav_down(code, vim_keys) => {
                 selected = (selected + 1).min(SETTINGS_COUNT - 1);
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 5 => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 6 => {
                 self.view.vim_keys = !self.view.vim_keys;
                 let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 6 => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if selected == 7 => {
                 self.view.image_mode = self.view.image_mode.next();
                 let _ = Config::update(|c| c.images = self.view.image_mode);
                 self.maybe_fetch_cover_image();
@@ -3569,29 +3599,37 @@ impl Client {
                     return KeyAction::Continue;
                 }
                 4 => {
+                    // 0 is off, n is n seconds: the index is the value.
+                    let secs = self.view.crossfade_secs.min(MAX_CROSSFADE_SECS);
+                    self.view.push_overlay(Overlay::CrossfadePicker {
+                        selected: usize::from(secs),
+                    });
+                    return KeyAction::Continue;
+                }
+                5 => {
                     let current = i18n::current_locale();
                     let idx = Locale::ALL.iter().position(|&l| l == current).unwrap_or(0);
                     self.view
                         .push_overlay(Overlay::LanguagePicker { selected: idx });
                     return KeyAction::Continue;
                 }
-                5 => {
+                6 => {
                     self.view.vim_keys = !self.view.vim_keys;
                     let _ = Config::update(|c| c.vim_keys = self.view.vim_keys);
                 }
-                6 => {
+                7 => {
                     self.view.image_mode = self.view.image_mode.next();
                     let _ = Config::update(|c| c.images = self.view.image_mode);
                     self.maybe_fetch_cover_image();
                 }
-                7 => {
+                8 => {
                     self.view.pop_overlay();
                     return KeyAction::SendCommand(Command::Logout);
                 }
-                8 => {
+                9 => {
                     return KeyAction::Detach;
                 }
-                9 => {
+                10 => {
                     return KeyAction::Quit;
                 }
                 _ => {}
@@ -5650,6 +5688,7 @@ impl Client {
             | Some(Overlay::ThemePicker { selected })
             | Some(Overlay::LanguagePicker { selected })
             | Some(Overlay::QualityPicker { selected })
+            | Some(Overlay::CrossfadePicker { selected })
             | Some(Overlay::UpdateAvailable { selected, .. }) => Some(selected),
             _ => None,
         }
@@ -6592,6 +6631,49 @@ mod tests {
             text.contains(crate::i18n::t().lyrics_no_track),
             "missing empty-state message: {text}"
         );
+    }
+
+    #[test]
+    fn settings_menu_renders_the_crossfade_row_and_its_picker() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let screen = |view: &mut ViewState| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+            terminal
+                .draw(|frame| crate::ui::popup::draw(frame, view))
+                .expect("draw");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+
+        // Row 4 of the settings menu is the crossfade: it shows the value
+        // from the snapshot, selected like any other row.
+        let mut view = ViewState::from_snapshot(&DaemonSnapshot {
+            screen: crate::protocol::Screen::Main,
+            crossfade_secs: 4,
+            ..DaemonSnapshot::default()
+        });
+        view.push_overlay(Overlay::Settings { selected: 4 });
+        let text = screen(&mut view);
+        assert!(
+            text.contains(&format!(" > {}", crate::i18n::t().settings_crossfade)),
+            "row 4 is not the crossfade row: {text}"
+        );
+        assert!(text.contains("4s"), "current value missing: {text}");
+
+        // Its picker goes from off to the longest fade the settings offer.
+        view.pop_overlay();
+        view.push_overlay(Overlay::CrossfadePicker { selected: 4 });
+        let text = screen(&mut view);
+        assert!(text.contains(" > 4 s"), "selected value missing: {text}");
+        assert!(text.contains("Off"), "off entry missing: {text}");
+        assert!(text.contains("12 s"), "longest fade missing: {text}");
     }
 
     #[test]

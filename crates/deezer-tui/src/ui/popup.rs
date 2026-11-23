@@ -95,6 +95,10 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState) {
             draw_quality_picker(frame, view, *selected);
             return;
         }
+        Some(Overlay::CrossfadePicker { selected }) => {
+            draw_crossfade_picker(frame, view, *selected);
+            return;
+        }
         Some(Overlay::Equalizer { column }) => {
             draw_equalizer(frame, view, *column);
             return;
@@ -1197,11 +1201,17 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
         deezer_core::config::ImageMode::On => "ON",
         deezer_core::config::ImageMode::Off => "OFF",
     };
+    let crossfade_status = if view.crossfade_secs == 0 {
+        String::from("OFF")
+    } else {
+        format!("{}s", view.crossfade_secs)
+    };
     let entries: &[(&str, &str)] = &[
         (s.settings_shortcuts, "?"),
         (s.settings_themes, ""),
         (s.settings_quality, ""),
         (s.settings_equalizer, eq_status),
+        (s.settings_crossfade, crossfade_status.as_str()),
         (s.settings_language, ""),
         (s.settings_vim_keys, vim_status),
         (s.settings_images, images_status),
@@ -1255,13 +1265,19 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
                     } else {
                         Theme::dim()
                     }
-                } else if i == 5 {
-                    if view.vim_keys {
+                } else if i == 4 {
+                    if view.crossfade_secs > 0 {
                         Style::default().fg(Theme::primary())
                     } else {
                         Theme::dim()
                     }
                 } else if i == 6 {
+                    if view.vim_keys {
+                        Style::default().fg(Theme::primary())
+                    } else {
+                        Theme::dim()
+                    }
+                } else if i == 7 {
                     if view.image_mode != deezer_core::config::ImageMode::Off {
                         Style::default().fg(Theme::primary())
                     } else {
@@ -1663,6 +1679,53 @@ fn draw_quality_picker(frame: &mut Frame, view: &ViewState, selected: usize) {
                 Theme::text()
             };
             ListItem::new(Line::from(Span::styled(label, style)))
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
+/// Draw the crossfade length picker: off, then one entry per second up to
+/// the longest the settings offer.
+fn draw_crossfade_picker(frame: &mut Frame, view: &ViewState, selected: usize) {
+    use deezer_core::config::MAX_CROSSFADE_SECS;
+
+    let count = usize::from(MAX_CROSSFADE_SECS) + 1;
+
+    let area = frame.area();
+    let height = count as u16 + 4;
+    let popup_area = centered_rect(40, height, area);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Theme::border_focused())
+        .style(Style::default().bg(Theme::surface()))
+        .title(format!(" {} ", t().settings_crossfade))
+        .title_style(Theme::title());
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    view.record_modal(popup_area);
+    view.record_rows(inner, 0, 0, count, RowsKind::Modal);
+
+    let items: Vec<ListItem> = (0..count)
+        .map(|i| {
+            let prefix = if i == selected { " > " } else { "   " };
+            let value = if i == 0 {
+                String::from("Off")
+            } else {
+                format!("{i} s")
+            };
+            let style = if i == selected {
+                Theme::highlight()
+            } else {
+                Theme::text()
+            };
+            ListItem::new(Line::from(Span::styled(format!("{prefix}{value}"), style)))
         })
         .collect();
 
