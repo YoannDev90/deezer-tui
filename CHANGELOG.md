@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Crossfade (Settings → Crossfade): Off to 12 s — tracks fade into each other when one ends on its own
 - Live lyrics (`m`): `t` switches to Deezer's translation when the track has one
 
 ### Changed

@@ -50,6 +50,7 @@ Binaries live on the [releases page](https://github.com/YoannDev90/deezer-tui/re
 * Background player — a small daemon keeps playing while the TUI is closed or detached
 * Audio quality selection (MP3 64 / 128 / 320, FLAC)
 * 10-band biquad equalizer [`e`]
+* Crossfade between tracks — Off to 12 s, from the settings menu
 * Deezer Flow, shuffle, repeat, seeking
 * Offline mode with downloaded tracks
 * MPRIS support on Linux desktops: play / next / previous from your media keys
@@ -116,7 +117,7 @@ Press [`?`] in the app for the full, localized list.
 | `w` | Waiting list (queue) |
 | `e` | Equalizer |
 | `f` / `g` | Deezer Flow / shuffle play favorites |
-| `Ctrl+O` | Settings (themes) |
+| `Ctrl+O` | Settings (themes, crossfade) |
 | `i` | Application info |
 | `Ctrl+Z` | Background mode (keep playing, detach) |
 | `Ctrl+Q` | Quit |

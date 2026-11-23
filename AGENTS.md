@@ -181,7 +181,7 @@ Audio decoding pure Rust via `symphonia` (MP3 + FLAC), no system codecs needed.
 - **Shortcuts help** (`?`): Keyboard shortcuts reference
 - **Live lyrics** (`m`): Time-synced lyrics with the current line highlighted as the track plays — `↑/↓`/`PgUp`/`PgDn`/`Home`/`End` scroll (stops following), `f` resumes following, `t` switches the line to Deezer's translation when the track has one (hint shown only then), `Space`/`n`/`b` keep controlling playback. Fetched from the pipe.deezer.com GraphQL `track { lyrics }` field (`deezer-core` `gateway::get_lyrics`); the gw-light `song.getLyrics` method now answers `DATA_ERROR` ("No lyrics id … and country FR") for every track, so it is no longer used. Unsynchronized lyrics are shown unhighlighted with a note. The highlight is timed from `PlayerState.position_ms` (millisecond-accurate, carried through the snapshot as `position_ms`), not the whole-second `position_secs`, so it tracks lines closer than a second apart.
 - **Info** (`i`): Version, links. Opens by itself on the first launch of a new version with the release notes since the last version used (`release_notes.rs`: CHANGELOG embedded via `include_str!`, last version in `<config_dir>/last_version`)
-- **Settings** (`Ctrl+O`): Theme selection (official Deezer dark themes)
+- **Settings** (`Ctrl+O`): Themes (official Deezer dark themes), crossfade length (Off → 12 s)
 - **Equalizer** (`e`): 10-band graphic EQ + global gain — `←/→` column, `↑/↓` gain, `Space` on/off, `p`/`P` preset, `0` reset column
 
 ### Search & Favorites Categories
