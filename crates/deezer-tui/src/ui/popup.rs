@@ -1100,10 +1100,23 @@ fn draw_lyrics_overlay(
     scroll = scroll.min(max_scroll);
 
     let mut state = ListState::default().with_offset(scroll);
-    frame.render_stateful_widget(List::new(lines), body, &mut state);
+    // The scrollbar gets its own column on the right, like every other list:
+    // drawing it over the body put it in the body's first column and ate the
+    // opening character of each line.
+    let (text_area, track) = split_list_scrollbar(body, 0, total);
+    let text_area = if track.is_some() {
+        // Keep a gap between the text and the scrollbar.
+        Rect {
+            width: text_area.width.saturating_sub(1),
+            ..text_area
+        }
+    } else {
+        text_area
+    };
+    frame.render_stateful_widget(List::new(lines), text_area, &mut state);
 
-    if total > body.height as usize {
-        draw_list_scrollbar(frame, body, scroll, total);
+    if let Some(track) = track {
+        draw_list_scrollbar(frame, track, scroll, total);
     }
 
     (scroll, manual)

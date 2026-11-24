@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- The lyrics overlay's scrollbar no longer cuts off the first letter of each line
+
 ## [1.23.0] - 2026-11-24
 
 ### Added

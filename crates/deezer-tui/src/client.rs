@@ -6634,6 +6634,63 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_overlay_keeps_the_scrollbar_off_the_text() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut view = ViewState::from_snapshot(&DaemonSnapshot {
+            screen: crate::protocol::Screen::Main,
+            current_track: Some(track("1")),
+            ..DaemonSnapshot::default()
+        });
+        view.lyrics_track_id = Some("1".into());
+        view.lyrics = Some(Lyrics {
+            synced: (0..60)
+                .map(|i| LyricLine {
+                    at_ms: i * 1000,
+                    text: format!("{i:02}|abcdefghij-abcdefghij-abcdefghij-abcdefghij-abcdefghij"),
+                    translated: None,
+                })
+                .collect(),
+            ..Lyrics::default()
+        });
+        view.push_overlay(Overlay::Lyrics {
+            scroll: 0,
+            manual: false,
+            translated: false,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::popup::draw(frame, &mut view))
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width as usize;
+        let cells = buffer.content();
+
+        // Overflowing lyrics draw a scrollbar; the thumb covers the first rows,
+        // which is where the opening characters used to be eaten.
+        let thumb = cells
+            .iter()
+            .position(|c| c.symbol() == "█")
+            .expect("no scrollbar thumb drawn");
+
+        let first_line = "00|abcdefghij-abcdefghij-abcdefghij-abcdefghij-abcdefghij";
+        let start = cells
+            .windows(first_line.len())
+            .position(|w| w.iter().map(|c| c.symbol()).collect::<String>() == first_line)
+            .expect("the first line lost its opening characters");
+
+        assert!(
+            thumb % width > start % width,
+            "scrollbar at column {} still sits left of the text at column {}",
+            thumb % width,
+            start % width
+        );
+    }
+
+    #[test]
     fn settings_menu_renders_the_crossfade_row_and_its_picker() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
