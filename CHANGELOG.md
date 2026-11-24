@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.23.0] - 2026-11-24
 
 ### Added
 - Crossfade (Settings → Crossfade): Off to 12 s — tracks fade into each other when one ends on its own
